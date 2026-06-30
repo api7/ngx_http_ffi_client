@@ -1,0 +1,414 @@
+#include "ngx_http_ffi_client.h"
+
+
+static ngx_int_t ngx_http_ffi_client_set_err(u_char *err, size_t *errlen,
+    const char *msg);
+static ngx_int_t ngx_http_ffi_client_response_append(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *data, size_t len);
+static u_char *ngx_http_ffi_client_find_header_end(u_char *start,
+    u_char *last);
+static ngx_int_t ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *header_end,
+    u_char *err, size_t *errlen);
+static ngx_int_t ngx_http_ffi_client_parse_content_length(ngx_str_t *value,
+    off_t *out);
+static ngx_uint_t ngx_http_ffi_client_str_eq_lc(ngx_str_t *s,
+    const char *name);
+static ngx_uint_t ngx_http_ffi_client_contains_lc(ngx_str_t *s,
+    const char *needle, size_t needle_len);
+static ngx_int_t ngx_http_ffi_client_response_update_body(
+    ngx_http_ffi_client_response_parser_t *parser, u_char *err,
+    size_t *errlen);
+
+
+ngx_int_t
+ngx_http_ffi_client_response_parser_init(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser)
+{
+    ngx_memzero(parser, sizeof(ngx_http_ffi_client_response_parser_t));
+
+    parser->content_length = -1;
+
+    if (ngx_array_init(&parser->headers, pool, 4,
+                       sizeof(ngx_http_ffi_client_ffi_header_t))
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *data, size_t len,
+    u_char *err, size_t *errlen)
+{
+    u_char      *header_end;
+    ngx_int_t    rc;
+
+    if (parser->done) {
+        return NGX_OK;
+    }
+
+    if (len > 0
+        && ngx_http_ffi_client_response_append(pool, parser, data, len)
+           != NGX_OK)
+    {
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    if (parser->raw == NULL) {
+        return NGX_OK;
+    }
+
+    if (!parser->headers_done) {
+        header_end = ngx_http_ffi_client_find_header_end(parser->raw->pos,
+                                                         parser->raw->last);
+        if (header_end == NULL) {
+            return NGX_OK;
+        }
+
+        rc = ngx_http_ffi_client_parse_headers(pool, parser, header_end, err,
+                                               errlen);
+        if (rc != NGX_OK) {
+            return rc;
+        }
+
+        parser->header_size = (header_end + 4) - parser->raw->pos;
+        parser->headers_done = 1;
+    }
+
+    return ngx_http_ffi_client_response_update_body(parser, err, errlen);
+}
+
+
+ngx_int_t
+ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
+{
+    (void) pool;
+
+    if (!parser->done) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "response body is incomplete");
+    }
+
+    resp->status = parser->status;
+    resp->headers = parser->headers.elts;
+    resp->headers_len = parser->headers.nelts;
+    resp->body.data = parser->body.data;
+    resp->body.len = parser->body.len;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_set_err(u_char *err, size_t *errlen, const char *msg)
+{
+    if (err != NULL && errlen != NULL && *errlen > 0) {
+        *errlen = ngx_snprintf(err, *errlen, "%s", msg) - err;
+    }
+
+    return NGX_ERROR;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_response_append(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *data, size_t len)
+{
+    size_t       used, size;
+    ngx_buf_t  *b;
+
+    if (parser->raw == NULL) {
+        size = ngx_max((size_t) 4096, len);
+        parser->raw = ngx_create_temp_buf(pool, size);
+        if (parser->raw == NULL) {
+            return NGX_ERROR;
+        }
+    }
+
+    used = parser->raw->last - parser->raw->pos;
+
+    if ((size_t) (parser->raw->end - parser->raw->last) < len) {
+        size = ngx_max(used + len, used * 2);
+        size = ngx_max(size, (size_t) 4096);
+
+        b = ngx_create_temp_buf(pool, size);
+        if (b == NULL) {
+            return NGX_ERROR;
+        }
+
+        b->last = ngx_cpymem(b->last, parser->raw->pos, used);
+        parser->raw = b;
+    }
+
+    parser->raw->last = ngx_cpymem(parser->raw->last, data, len);
+
+    return NGX_OK;
+}
+
+
+static u_char *
+ngx_http_ffi_client_find_header_end(u_char *start, u_char *last)
+{
+    u_char  *p;
+
+    if (last - start < 4) {
+        return NULL;
+    }
+
+    for (p = start; p <= last - 4; p++) {
+        if (p[0] == CR && p[1] == LF && p[2] == CR && p[3] == LF) {
+            return p;
+        }
+    }
+
+    return NULL;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *header_end,
+    u_char *err, size_t *errlen)
+{
+    u_char                             *p, *line_end, *colon, *headers_last;
+    u_char                             *key_start, *key_end;
+    u_char                             *value_start, *value_end;
+    ngx_int_t                           status;
+    off_t                               content_length;
+    ngx_str_t                           key, value;
+    ngx_http_ffi_client_ffi_header_t   *header;
+
+    headers_last = header_end + 2;
+
+    p = parser->raw->pos;
+    line_end = ngx_strlchr(p, headers_last, LF);
+
+    if (line_end == NULL || line_end == p || line_end[-1] != CR) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "invalid response status line");
+    }
+
+    if (line_end - p < 12
+        || ngx_strncmp(p, "HTTP/1.", sizeof("HTTP/1.") - 1) != 0
+        || (p[7] != '0' && p[7] != '1')
+        || p[8] != ' ')
+    {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "invalid response status line");
+    }
+
+    status = ngx_atoi(p + 9, 3);
+    if (status == NGX_ERROR) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "invalid response status");
+    }
+
+    parser->status = (ngx_uint_t) status;
+    p = line_end + 1;
+
+    while (p < header_end) {
+        line_end = ngx_strlchr(p, headers_last, LF);
+        if (line_end == NULL || line_end == p || line_end[-1] != CR) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid response header");
+        }
+
+        colon = ngx_strlchr(p, line_end - 1, ':');
+        if (colon == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid response header");
+        }
+
+        key_start = p;
+        key_end = colon;
+        while (key_end > key_start
+               && (key_end[-1] == ' ' || key_end[-1] == '\t'))
+        {
+            key_end--;
+        }
+
+        if (key_end == key_start) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid response header");
+        }
+
+        value_start = colon + 1;
+        value_end = line_end - 1;
+
+        while (value_start < value_end
+               && (*value_start == ' ' || *value_start == '\t'))
+        {
+            value_start++;
+        }
+
+        while (value_end > value_start
+               && (value_end[-1] == ' ' || value_end[-1] == '\t'))
+        {
+            value_end--;
+        }
+
+        key.len = key_end - key_start;
+        key.data = ngx_pnalloc(pool, key.len);
+        if (key.data == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+        }
+        ngx_memcpy(key.data, key_start, key.len);
+
+        value.len = value_end - value_start;
+        if (value.len == 0) {
+            value.data = (u_char *) "";
+
+        } else {
+            value.data = ngx_pnalloc(pool, value.len);
+            if (value.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+
+            ngx_memcpy(value.data, value_start, value.len);
+        }
+
+        header = ngx_array_push(&parser->headers);
+        if (header == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+        }
+
+        header->key.data = key.data;
+        header->key.len = key.len;
+        header->value.data = value.data;
+        header->value.len = value.len;
+
+        if (ngx_http_ffi_client_str_eq_lc(&key, "Content-Length")) {
+            if (ngx_http_ffi_client_parse_content_length(&value,
+                                                         &content_length)
+                != NGX_OK)
+            {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid content-length");
+            }
+
+            if (parser->content_length != -1
+                && parser->content_length != content_length)
+            {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                    "conflicting content-length");
+            }
+
+            parser->content_length = content_length;
+        }
+
+        if (ngx_http_ffi_client_str_eq_lc(&key, "Transfer-Encoding")
+            && ngx_http_ffi_client_contains_lc(&value, "chunked",
+                                               sizeof("chunked") - 1))
+        {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "chunked response is not supported");
+        }
+
+        p = line_end + 1;
+    }
+
+    if (parser->content_length == -1) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "content-length is required");
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_parse_content_length(ngx_str_t *value, off_t *out)
+{
+    off_t    n;
+    size_t   i;
+
+    if (value->len == 0) {
+        return NGX_ERROR;
+    }
+
+    n = 0;
+
+    for (i = 0; i < value->len; i++) {
+        if (value->data[i] < '0' || value->data[i] > '9') {
+            return NGX_ERROR;
+        }
+
+        if (n > (NGX_MAX_OFF_T_VALUE - (value->data[i] - '0')) / 10) {
+            return NGX_ERROR;
+        }
+
+        n = n * 10 + (value->data[i] - '0');
+    }
+
+    *out = n;
+
+    return NGX_OK;
+}
+
+
+static ngx_uint_t
+ngx_http_ffi_client_str_eq_lc(ngx_str_t *s, const char *name)
+{
+    size_t  len;
+
+    len = ngx_strlen((u_char *) name);
+
+    return s->len == len
+           && ngx_strncasecmp(s->data, (u_char *) name, len) == 0;
+}
+
+
+static ngx_uint_t
+ngx_http_ffi_client_contains_lc(ngx_str_t *s, const char *needle,
+    size_t needle_len)
+{
+    u_char  *p, *last;
+
+    if (s->len < needle_len) {
+        return 0;
+    }
+
+    last = s->data + s->len - needle_len;
+
+    for (p = s->data; p <= last; p++) {
+        if (ngx_strncasecmp(p, (u_char *) needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_response_update_body(
+    ngx_http_ffi_client_response_parser_t *parser, u_char *err,
+    size_t *errlen)
+{
+    u_char  *body_start;
+    size_t   body_len;
+
+    body_start = parser->raw->pos + parser->header_size;
+    body_len = parser->raw->last - body_start;
+
+    if (body_len > (size_t) parser->content_length) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+            "response body is larger than content-length");
+    }
+
+    parser->body.data = body_start;
+    parser->body.len = body_len;
+
+    if (body_len == (size_t) parser->content_length) {
+        parser->done = 1;
+    }
+
+    return NGX_OK;
+}
