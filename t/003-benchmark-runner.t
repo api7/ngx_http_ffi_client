@@ -33,8 +33,10 @@ like(slurp($runner), qr/BENCH_DRY_RUN/, 'runner supports dry-run mode');
 like(slurp($runner), qr/CPU_SATURATION_THRESHOLD/, 'runner checks CPU saturation');
 like(slurp($runner), qr/WRK2_BIN/, 'runner uses wrk2 binary configuration');
 like(slurp($runner), qr/WRK_RATE/, 'runner supports wrk2 target rate');
-like(slurp($runner), qr/WRK_CONNECTIONS="\$\{WRK_CONNECTIONS:-10\}"/,
-    'runner defaults wrk2 connections to 10');
+like(slurp($runner), qr/WRK_CONNECTIONS="\$\{WRK_CONNECTIONS:-100\}"/,
+    'runner defaults wrk2 connections to 100');
+like(slurp($runner), qr/KEEPALIVE_POOL_SIZE="\$\{KEEPALIVE_POOL_SIZE:-120\}"/,
+    'runner defaults keepalive pool size above wrk2 connections');
 like(slurp($runner), qr/\s-U\s/, 'runner enables wrk2 uncorrected latency output');
 like(slurp($runner), qr/\s-R\s+"\$WRK_RATE"/, 'runner passes wrk2 target rate');
 like(slurp($runner), qr/run_wrk_case "baseline" "\/bench\/baseline"/,
@@ -45,8 +47,10 @@ like(slurp($runner), qr/print_outbound_estimate/,
 ok(-f $target_template, 'target nginx template exists');
 ok(-f $upstream_template, 'upstream nginx template exists');
 ok(-f $wrk_headers, 'wrk headers script exists');
-like(slurp($readme), qr/\| `WRK_CONNECTIONS` \| `10` \|/,
+like(slurp($readme), qr/\| `WRK_CONNECTIONS` \| `100` \|/,
     'README documents wrk2 connection default');
+like(slurp($readme), qr/\| `KEEPALIVE_POOL_SIZE` \| `120` \|/,
+    'README documents keepalive pool default');
 
 my $cmd = join ' ',
     'cd', quotemeta($root), '&&',
@@ -67,6 +71,7 @@ like($output, qr/Benchmark configuration/, 'dry-run prints configuration');
 like($output, qr/TARGET_CPU=0/, 'dry-run prints target CPU');
 like($output, qr/UPSTREAM_CPUS=1/, 'dry-run prints upstream CPUs');
 like($output, qr/WRK_CPUS=1/, 'dry-run prints wrk CPUs');
+like($output, qr/KEEPALIVE_POOL_SIZE=120/, 'dry-run prints keepalive pool default');
 like($output, qr/WRK_RATE=1000/, 'dry-run prints wrk2 target rate');
 
 my $rendered_target = File::Spec->catfile(

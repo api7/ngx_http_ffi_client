@@ -55,10 +55,10 @@ The benchmark cases run in this order:
 | `UPSTREAM_PORT` | `19841` | upstream listen port |
 | `UPSTREAM_WORKERS` | count of `UPSTREAM_CPUS` | upstream worker count |
 | `RESPONSE_SIZE` | `1024` | upstream response body size in bytes |
-| `KEEPALIVE_POOL_SIZE` | `256` | keepalive pool size for both client paths |
+| `KEEPALIVE_POOL_SIZE` | `120` | keepalive pool size for both client paths |
 | `KEEPALIVE_IDLE_TIMEOUT` | `60000` | keepalive idle timeout in milliseconds |
 | `WRK_THREADS` | `2` | wrk2 thread count |
-| `WRK_CONNECTIONS` | `10` | wrk2 connection count |
+| `WRK_CONNECTIONS` | `100` | wrk2 connection count |
 | `WRK_DURATION` | `30s` | official benchmark duration |
 | `WRK_RATE` | `100000` | wrk2 target request rate, set high enough to saturate the target worker |
 | `WRK2_BIN` | `wrk` | wrk2 executable path |
