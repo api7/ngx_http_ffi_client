@@ -237,7 +237,7 @@ ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
         return ngx_http_ffi_client_set_err(err, errlen, "invalid host");
     }
 
-    ipv6 = ngx_memchr(req->host.data, ':', req->host.len) != NULL;
+    ipv6 = memchr(req->host.data, ':', req->host.len) != NULL;
 
     host->len = req->host.len + (req->port == 80 ? 0 : NGX_INT_T_LEN + 1)
                 + (ipv6 ? 2 : 0);
@@ -379,7 +379,7 @@ ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
 
     host.data = req->host.data;
     host.len = req->host.len;
-    ipv6 = ngx_memchr(host.data, ':', host.len) != NULL;
+    ipv6 = memchr(host.data, ':', host.len) != NULL;
 
     len = host.len + NGX_INT_T_LEN + 4;
     text = ngx_pnalloc(r->pool, len);
