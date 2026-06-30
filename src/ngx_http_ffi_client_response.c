@@ -211,6 +211,7 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
     }
 
     parser->status = (ngx_uint_t) status;
+    parser->connection_close = p[7] == '0';
     p = line_end + 1;
 
     while (p < header_end) {
@@ -309,6 +310,20 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
         {
             return ngx_http_ffi_client_set_err(err, errlen,
                                                "chunked response is not supported");
+        }
+
+        if (ngx_http_ffi_client_str_eq_lc(&key, "Connection")) {
+            if (ngx_http_ffi_client_contains_lc(&value, "close",
+                                                sizeof("close") - 1))
+            {
+                parser->connection_close = 1;
+            }
+
+            if (ngx_http_ffi_client_contains_lc(&value, "keep-alive",
+                                                sizeof("keep-alive") - 1))
+            {
+                parser->connection_close = 0;
+            }
         }
 
         p = line_end + 1;

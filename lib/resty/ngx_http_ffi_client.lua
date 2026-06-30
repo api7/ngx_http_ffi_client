@@ -45,6 +45,10 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         ngx_http_ffi_client_ffi_header_t *headers;
         uintptr_t headers_len;
         ngx_http_ffi_client_ffi_str_t body;
+        ngx_http_ffi_client_ffi_str_t keepalive_pool;
+        uintptr_t keepalive;
+        uintptr_t keepalive_idle_timeout;
+        uintptr_t keepalive_pool_size;
         uintptr_t connect_timeout;
         uintptr_t send_timeout;
         uintptr_t read_timeout;
@@ -55,6 +59,7 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         ngx_http_ffi_client_ffi_header_t *headers;
         uintptr_t headers_len;
         ngx_http_ffi_client_ffi_str_t body;
+        uintptr_t reused;
     } ngx_http_ffi_client_ffi_resp_t;
 
     int ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
@@ -158,6 +163,7 @@ local function response_table(resp)
         status = tonumber(resp.status),
         headers = headers,
         body = body,
+        reused = resp.reused ~= 0,
     }
 end
 
@@ -189,9 +195,36 @@ function _M.request(opts)
     local method = opts.method or "GET"
     local path = opts.path or "/"
     local body = opts.body
+    local keepalive = opts.keepalive
 
     if body ~= nil and type(body) ~= "string" then
         body = tostring(body)
+    end
+
+    if keepalive ~= nil and type(keepalive) ~= "table" then
+        return nil, "keepalive must be a table"
+    end
+
+    local keepalive_pool
+    local keepalive_idle_timeout = 0
+    local keepalive_pool_size = 0
+
+    if keepalive then
+        keepalive_pool = keepalive.pool
+        if keepalive_pool ~= nil and type(keepalive_pool) ~= "string" then
+            return nil, "keepalive.pool must be a string"
+        end
+
+        keepalive_idle_timeout =
+            tonumber(keepalive.idle_timeout or 60000)
+        if not keepalive_idle_timeout or keepalive_idle_timeout < 0 then
+            return nil, "bad keepalive.idle_timeout"
+        end
+
+        keepalive_pool_size = tonumber(keepalive.pool_size or 30)
+        if not keepalive_pool_size or keepalive_pool_size < 1 then
+            return nil, "bad keepalive.pool_size"
+        end
     end
 
     local header_arr, header_count, header_refs, header_err =
@@ -209,6 +242,7 @@ function _M.request(opts)
         set_str(req.method, method),
         set_str(req.path, path),
         set_str(req.body, body),
+        set_str(req.keepalive_pool, keepalive_pool),
         header_arr,
         header_refs,
     }
@@ -216,6 +250,9 @@ function _M.request(opts)
     req.port = port
     req.headers = header_arr
     req.headers_len = header_count
+    req.keepalive = keepalive and 1 or 0
+    req.keepalive_idle_timeout = keepalive_idle_timeout
+    req.keepalive_pool_size = keepalive_pool_size
     req.connect_timeout = tonumber(opts.connect_timeout or opts.timeout or 60000)
     req.send_timeout = tonumber(opts.send_timeout or opts.timeout or 60000)
     req.read_timeout = tonumber(opts.read_timeout or opts.timeout or 60000)
