@@ -45,8 +45,29 @@ typedef struct {
 } ngx_http_ffi_client_ffi_resp_t;
 
 
+typedef struct {
+    ngx_uint_t                       status;
+    ngx_array_t                      headers;
+    off_t                            content_length;
+    ngx_str_t                        body;
+    ngx_buf_t                       *raw;
+    size_t                           header_size;
+    unsigned                         headers_done:1;
+    unsigned                         done:1;
+} ngx_http_ffi_client_response_parser_t;
+
+
 ngx_int_t ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_ffi_resp_t *resp,
     u_char *err, size_t *errlen);
+
+ngx_int_t ngx_http_ffi_client_response_parser_init(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser);
+ngx_int_t ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *data, size_t len,
+    u_char *err, size_t *errlen);
+ngx_int_t ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
 
 #endif /* _NGX_HTTP_FFI_CLIENT_H_INCLUDED_ */
