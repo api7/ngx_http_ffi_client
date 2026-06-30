@@ -31,6 +31,10 @@ typedef struct {
     ngx_http_ffi_client_ffi_header_t *headers;
     ngx_uint_t                       headers_len;
     ngx_http_ffi_client_ffi_str_t    body;
+    ngx_http_ffi_client_ffi_str_t    keepalive_pool;
+    ngx_uint_t                       keepalive;
+    ngx_msec_t                       keepalive_idle_timeout;
+    ngx_uint_t                       keepalive_pool_size;
     ngx_msec_t                       connect_timeout;
     ngx_msec_t                       send_timeout;
     ngx_msec_t                       read_timeout;
@@ -42,6 +46,7 @@ typedef struct {
     ngx_http_ffi_client_ffi_header_t *headers;
     ngx_uint_t                       headers_len;
     ngx_http_ffi_client_ffi_str_t    body;
+    ngx_uint_t                       reused;
 } ngx_http_ffi_client_ffi_resp_t;
 
 
@@ -54,7 +59,20 @@ typedef struct {
     size_t                           header_size;
     unsigned                         headers_done:1;
     unsigned                         done:1;
+    unsigned                         connection_close:1;
 } ngx_http_ffi_client_response_parser_t;
+
+
+typedef struct ngx_http_ffi_client_keepalive_pool_s
+    ngx_http_ffi_client_keepalive_pool_t;
+typedef struct ngx_http_ffi_client_keepalive_item_s
+    ngx_http_ffi_client_keepalive_item_t;
+
+
+typedef struct {
+    ngx_rbtree_t                      pools;
+    ngx_rbtree_node_t                 sentinel;
+} ngx_http_ffi_client_main_conf_t;
 
 
 typedef enum {
@@ -82,10 +100,20 @@ struct ngx_http_ffi_client_op_s {
     ngx_msec_t                           send_timeout;
     ngx_msec_t                           read_timeout;
     ngx_str_t                            host_header;
+    ngx_str_t                            keepalive_key;
+    ngx_http_ffi_client_keepalive_pool_t *keepalive_pool;
+    ngx_msec_t                           keepalive_idle_timeout;
+    ngx_uint_t                           keepalive_pool_size;
     u_char                               err[NGX_HTTP_FFI_CLIENT_ERR_BUF_SIZE];
     size_t                               errlen;
     unsigned                             resumed:1;
+    unsigned                             keepalive:1;
+    unsigned                             keepalive_counted:1;
+    unsigned                             reused:1;
 };
+
+
+extern ngx_module_t ngx_http_ffi_client_module;
 
 
 ngx_int_t ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
@@ -103,5 +131,11 @@ ngx_int_t ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
 ngx_int_t ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
     ngx_http_ffi_client_response_parser_t *parser,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
+
+ngx_int_t ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
+    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
+    u_char *err, size_t *errlen);
+ngx_int_t ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op);
+void ngx_http_ffi_client_keepalive_close_active(ngx_http_ffi_client_op_t *op);
 
 #endif /* _NGX_HTTP_FFI_CLIENT_H_INCLUDED_ */

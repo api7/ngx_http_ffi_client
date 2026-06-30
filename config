@@ -23,6 +23,7 @@ HTTP_MODULES="$HTTP_MODULES ngx_http_ffi_client_module"
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
     $ngx_addon_dir/src/ngx_http_ffi_client_module.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_lua.c \
+    $ngx_addon_dir/src/ngx_http_ffi_client_keepalive.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_request.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_response.c"
 

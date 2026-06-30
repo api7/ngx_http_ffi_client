@@ -22,6 +22,8 @@ static ngx_int_t ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
 static void ngx_http_ffi_client_write_handler(ngx_event_t *wev);
 static void ngx_http_ffi_client_read_handler(ngx_event_t *rev);
 static ngx_int_t ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_prepare_connection(
+    ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op);
 static void ngx_http_ffi_client_cleanup(void *data);
@@ -62,6 +64,11 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "invalid headers");
     }
 
+    if (req->keepalive && req->keepalive_pool_size == 0) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "bad keepalive pool size");
+    }
+
     op = ngx_pcalloc(r->pool, sizeof(ngx_http_ffi_client_op_t));
     if (op == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "no memory");
@@ -72,6 +79,9 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     op->connect_timeout = req->connect_timeout;
     op->send_timeout = req->send_timeout;
     op->read_timeout = req->read_timeout;
+    op->keepalive = req->keepalive ? 1 : 0;
+    op->keepalive_idle_timeout = req->keepalive_idle_timeout;
+    op->keepalive_pool_size = req->keepalive_pool_size;
     op->errlen = 0;
 
     op->coctx = ngx_http_lua_get_cur_co_ctx(r);
@@ -104,6 +114,28 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
+    if (op->keepalive) {
+        rc = ngx_http_ffi_client_keepalive_get(r, op, req, err, errlen);
+        if (rc == NGX_OK) {
+            if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
+                ngx_http_ffi_client_close(op);
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+
+            ngx_http_lua_cleanup_co_ctx_pending_operation(op->coctx);
+            ngx_http_lua_set_co_ctx_cleanup(op->coctx,
+                                            ngx_http_ffi_client_cleanup, op);
+
+            op->state = NGX_HTTP_FFI_CLIENT_WRITING;
+            ngx_post_event(op->peer.connection->write, &ngx_posted_events);
+            return NGX_AGAIN;
+        }
+
+        if (rc == NGX_ERROR) {
+            return NGX_ERROR;
+        }
+    }
+
     op->peer.get = ngx_http_ffi_client_get_peer;
     op->peer.log = r->connection->log;
     op->peer.log_error = NGX_ERROR_ERR;
@@ -123,23 +155,10 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     }
 
     c = op->peer.connection;
-    c->data = op;
-    c->write->handler = ngx_http_ffi_client_write_handler;
-    c->read->handler = ngx_http_ffi_client_read_handler;
-    c->log = r->connection->log;
-    c->read->log = c->log;
-    c->write->log = c->log;
-    c->sendfile &= r->connection->sendfile;
-
-    if (c->pool == NULL) {
-        c->pool = ngx_create_pool(128, c->log);
-        if (c->pool == NULL) {
-            ngx_http_ffi_client_close(op);
-            return ngx_http_ffi_client_set_err(err, errlen, "no memory");
-        }
+    if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
+        ngx_http_ffi_client_close(op);
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
     }
-
-    c->pool->log = c->log;
 
     ngx_http_lua_cleanup_co_ctx_pending_operation(op->coctx);
     ngx_http_lua_set_co_ctx_cleanup(op->coctx, ngx_http_ffi_client_cleanup,
@@ -297,7 +316,8 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     len = req->method.len + 1 + req->path.len
           + sizeof(" HTTP/1.1" CRLF) - 1
           + sizeof("Host: " CRLF) - 1 + host->len
-          + sizeof("Connection: close" CRLF) - 1
+          + (req->keepalive ? sizeof("Connection: keep-alive" CRLF) - 1
+                            : sizeof("Connection: close" CRLF) - 1)
           + sizeof("Content-Length: " CRLF) - 1 + NGX_SIZE_T_LEN
           + sizeof(CRLF) - 1
           + req->body.len;
@@ -337,8 +357,14 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     p = ngx_cpymem(p, "Host: ", sizeof("Host: ") - 1);
     p = ngx_cpymem(p, host->data, host->len);
     p = ngx_cpymem(p, CRLF, sizeof(CRLF) - 1);
-    p = ngx_cpymem(p, "Connection: close" CRLF,
-                   sizeof("Connection: close" CRLF) - 1);
+    if (req->keepalive) {
+        p = ngx_cpymem(p, "Connection: keep-alive" CRLF,
+                       sizeof("Connection: keep-alive" CRLF) - 1);
+
+    } else {
+        p = ngx_cpymem(p, "Connection: close" CRLF,
+                       sizeof("Connection: close" CRLF) - 1);
+    }
     p = ngx_sprintf(p, "Content-Length: %uz" CRLF, req->body.len);
 
     for (i = 0; i < req->headers_len; i++) {
@@ -506,6 +532,34 @@ ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
 
 
 static ngx_int_t
+ngx_http_ffi_client_prepare_connection(ngx_http_ffi_client_op_t *op)
+{
+    ngx_connection_t *c;
+
+    c = op->peer.connection;
+
+    c->data = op;
+    c->write->handler = ngx_http_ffi_client_write_handler;
+    c->read->handler = ngx_http_ffi_client_read_handler;
+    c->log = op->r->connection->log;
+    c->read->log = c->log;
+    c->write->log = c->log;
+    c->sendfile &= op->r->connection->sendfile;
+
+    if (c->pool == NULL) {
+        c->pool = ngx_create_pool(128, c->log);
+        if (c->pool == NULL) {
+            return NGX_ERROR;
+        }
+    }
+
+    c->pool->log = c->log;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op)
 {
     ssize_t           n;
@@ -580,6 +634,7 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
                     return NGX_ERROR;
                 }
 
+                op->ffi_resp->reused = op->reused;
                 ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
                 return NGX_OK;
             }
@@ -668,23 +723,7 @@ ngx_http_ffi_client_cleanup(void *data)
 static void
 ngx_http_ffi_client_close(ngx_http_ffi_client_op_t *op)
 {
-    ngx_connection_t *c;
-
-    c = op->peer.connection;
-    if (c == NULL) {
-        return;
-    }
-
-    if (c->read->timer_set) {
-        ngx_del_timer(c->read);
-    }
-
-    if (c->write->timer_set) {
-        ngx_del_timer(c->write);
-    }
-
-    ngx_close_connection(c);
-    op->peer.connection = NULL;
+    ngx_http_ffi_client_keepalive_close_active(op);
 }
 
 
@@ -706,7 +745,16 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
         ngx_http_ffi_client_set_op_err(op, msg);
     }
 
-    ngx_http_ffi_client_close(op);
+    if (rc == NGX_OK
+        && op->keepalive
+        && !op->parser.connection_close
+        && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
+    {
+        /* saved for reuse */
+
+    } else {
+        ngx_http_ffi_client_close(op);
+    }
 
     co = ngx_http_lua_get_co_ctx_vm(op->coctx);
 
