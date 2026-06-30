@@ -177,7 +177,7 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
     ngx_http_ffi_client_response_parser_t *parser, u_char *header_end,
     u_char *err, size_t *errlen)
 {
-    u_char                             *p, *line_end, *colon;
+    u_char                             *p, *line_end, *colon, *headers_last;
     u_char                             *key_start, *key_end;
     u_char                             *value_start, *value_end;
     ngx_int_t                           status;
@@ -185,8 +185,10 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
     ngx_str_t                           key, value;
     ngx_http_ffi_client_ffi_header_t   *header;
 
+    headers_last = header_end + 2;
+
     p = parser->raw->pos;
-    line_end = ngx_strlchr(p, header_end, LF);
+    line_end = ngx_strlchr(p, headers_last, LF);
 
     if (line_end == NULL || line_end == p || line_end[-1] != CR) {
         return ngx_http_ffi_client_set_err(err, errlen,
@@ -212,7 +214,7 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
     p = line_end + 1;
 
     while (p < header_end) {
-        line_end = ngx_strlchr(p, header_end, LF);
+        line_end = ngx_strlchr(p, headers_last, LF);
         if (line_end == NULL || line_end == p || line_end[-1] != CR) {
             return ngx_http_ffi_client_set_err(err, errlen,
                                                "invalid response header");
