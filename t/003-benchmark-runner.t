@@ -30,6 +30,10 @@ like(slurp($makefile), qr{\./benchmark/run\.sh}, 'bench target delegates to benc
 ok(-x $runner, 'benchmark/run.sh exists and is executable');
 like(slurp($runner), qr/BENCH_DRY_RUN/, 'runner supports dry-run mode');
 like(slurp($runner), qr/CPU_SATURATION_THRESHOLD/, 'runner checks CPU saturation');
+like(slurp($runner), qr/WRK2_BIN/, 'runner uses wrk2 binary configuration');
+like(slurp($runner), qr/WRK_RATE/, 'runner supports wrk2 target rate');
+like(slurp($runner), qr/\s-U\s/, 'runner enables wrk2 uncorrected latency output');
+like(slurp($runner), qr/\s-R\s+"\$WRK_RATE"/, 'runner passes wrk2 target rate');
 
 ok(-f $target_template, 'target nginx template exists');
 ok(-f $upstream_template, 'upstream nginx template exists');
@@ -44,6 +48,7 @@ my $cmd = join ' ',
     'WRK_THREADS=1',
     'WRK_CONNECTIONS=1',
     'WRK_DURATION=1s',
+    'WRK_RATE=1000',
     'make bench';
 
 my $output = `$cmd 2>&1`;
@@ -53,6 +58,7 @@ like($output, qr/Benchmark configuration/, 'dry-run prints configuration');
 like($output, qr/TARGET_CPU=0/, 'dry-run prints target CPU');
 like($output, qr/UPSTREAM_CPUS=1/, 'dry-run prints upstream CPUs');
 like($output, qr/WRK_CPUS=1/, 'dry-run prints wrk CPUs');
+like($output, qr/WRK_RATE=1000/, 'dry-run prints wrk2 target rate');
 
 my $rendered_target = File::Spec->catfile(
     $root, 'benchmark', '.run', 'target', 'conf', 'nginx.conf'

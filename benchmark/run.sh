@@ -16,13 +16,14 @@ KEEPALIVE_IDLE_TIMEOUT="${KEEPALIVE_IDLE_TIMEOUT:-60000}"
 WRK_THREADS="${WRK_THREADS:-2}"
 WRK_CONNECTIONS="${WRK_CONNECTIONS:-200}"
 WRK_DURATION="${WRK_DURATION:-30s}"
+WRK_RATE="${WRK_RATE:-100000}"
 CPU_SATURATION_THRESHOLD="${CPU_SATURATION_THRESHOLD:-95}"
 BENCH_DRY_RUN="${BENCH_DRY_RUN:-0}"
 
 TEST_NGINX_BINARY="${TEST_NGINX_BINARY:-}"
 TEST_NGINX_LUA_PACKAGE_PATH="${TEST_NGINX_LUA_PACKAGE_PATH:-$ROOT_DIR/lib/?.lua;$ROOT_DIR/lib/?/init.lua}"
 
-WRK_BIN="${WRK_BIN:-wrk}"
+WRK2_BIN="${WRK2_BIN:-${WRK_BIN:-wrk}}"
 CURL_BIN="${CURL_BIN:-curl}"
 TASKSET_BIN="${TASKSET_BIN:-taskset}"
 
@@ -158,6 +159,7 @@ KEEPALIVE_IDLE_TIMEOUT=$KEEPALIVE_IDLE_TIMEOUT
 WRK_THREADS=$WRK_THREADS
 WRK_CONNECTIONS=$WRK_CONNECTIONS
 WRK_DURATION=$WRK_DURATION
+WRK_RATE=$WRK_RATE
 CPU_SATURATION_THRESHOLD=$CPU_SATURATION_THRESHOLD
 EOF
 }
@@ -166,7 +168,7 @@ validate_runtime() {
     [[ -n "$TEST_NGINX_BINARY" ]] || die "TEST_NGINX_BINARY is required"
     [[ -x "$TEST_NGINX_BINARY" ]] ||
         die "TEST_NGINX_BINARY is not executable: $TEST_NGINX_BINARY"
-    need_cmd "$WRK_BIN"
+    need_cmd "$WRK2_BIN"
     need_cmd "$CURL_BIN"
     need_cmd "$TASKSET_BIN"
 }
@@ -330,10 +332,13 @@ run_wrk_case() {
     sample_cpu_loop "$worker_pid" "$samples" &
     sampler_pid="$!"
 
-    "$TASKSET_BIN" -c "$WRK_CPUS" "$WRK_BIN" \
+    "$TASKSET_BIN" -c "$WRK_CPUS" "$WRK2_BIN" \
         -t "$WRK_THREADS" \
         -c "$WRK_CONNECTIONS" \
         -d "$WRK_DURATION" \
+        -R "$WRK_RATE" \
+        -L \
+        -U \
         -s "$ROOT_DIR/benchmark/wrk/headers.lua" \
         "http://127.0.0.1:$TARGET_PORT$path"
 
@@ -354,7 +359,7 @@ prepare_configs
 print_config
 
 if [[ "$BENCH_DRY_RUN" == "1" ]]; then
-    printf 'BENCH_DRY_RUN=1, not starting OpenResty or wrk\n'
+    printf 'BENCH_DRY_RUN=1, not starting OpenResty or wrk2\n'
     exit 0
 fi
 
