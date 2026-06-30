@@ -57,7 +57,41 @@ typedef struct {
 } ngx_http_ffi_client_response_parser_t;
 
 
+typedef enum {
+    NGX_HTTP_FFI_CLIENT_CONNECTING = 0,
+    NGX_HTTP_FFI_CLIENT_WRITING,
+    NGX_HTTP_FFI_CLIENT_READING,
+    NGX_HTTP_FFI_CLIENT_DONE,
+    NGX_HTTP_FFI_CLIENT_FAILED
+} ngx_http_ffi_client_state_e;
+
+
+typedef struct ngx_http_ffi_client_op_s ngx_http_ffi_client_op_t;
+
+
+struct ngx_http_ffi_client_op_s {
+    ngx_http_request_t                  *r;
+    ngx_http_lua_co_ctx_t               *coctx;
+    ngx_http_ffi_client_ffi_resp_t      *ffi_resp;
+    ngx_peer_connection_t                peer;
+    ngx_str_t                            peer_name;
+    ngx_http_ffi_client_state_e          state;
+    ngx_buf_t                           *request;
+    ngx_http_ffi_client_response_parser_t parser;
+    ngx_msec_t                           connect_timeout;
+    ngx_msec_t                           send_timeout;
+    ngx_msec_t                           read_timeout;
+    ngx_str_t                            host_header;
+    u_char                               err[NGX_HTTP_FFI_CLIENT_ERR_BUF_SIZE];
+    size_t                               errlen;
+    unsigned                             resumed:1;
+};
+
+
 ngx_int_t ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
+    ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_ffi_resp_t *resp,
+    u_char *err, size_t *errlen);
+ngx_int_t ngx_http_ffi_client_start(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_ffi_resp_t *resp,
     u_char *err, size_t *errlen);
 
