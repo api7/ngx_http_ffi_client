@@ -12,6 +12,61 @@ upstream; it only returns a response body with the same size as the upstream
 response. The C FFI and `resty.http` cases are then compared against this
 baseline to estimate the outbound HTTP client cost.
 
+## Current Result Summary
+
+The latest local runs compare three paths:
+
+- no-upstream baseline: target OpenResty returns a fixed response body directly
+- C FFI client: target OpenResty sends one upstream HTTP request with
+  `resty.ngx_http_ffi_client`
+- `resty.http`: target OpenResty sends one upstream HTTP request with
+  `lua-resty-http`
+
+Both load points used `WRK_DURATION=15s`, `WRK_RATE=100000`,
+`WRK_THREADS=2`, `KEEPALIVE_POOL_SIZE=120`, `KEEPALIVE_IDLE_TIMEOUT=60000`,
+and `RESPONSE_SIZE=1024`. The target worker was pinned to CPU `0`, the
+upstream workers used CPUs `1-5`, wrk2 used CPUs `6-7`, and the upstream used
+`UPSTREAM_WORKERS=5`.
+
+| wrk2 connections | no-upstream baseline | C FFI client | `resty.http` | C FFI / `resty.http` QPS | outbound cost ratio (`resty.http` / C FFI) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `10` | `83998.04` QPS | `32831.68` QPS | `16123.19` QPS | `2.04x` | `2.70x` |
+| `100` | `96155.73` QPS | `38582.72` QPS | `14665.62` QPS | `2.63x` | `3.72x` |
+
+The QPS ratio is the direct end-to-end throughput comparison between the C FFI
+client and `resty.http`. The outbound cost ratio subtracts the no-upstream
+baseline from both client paths and compares the estimated upstream HTTP client
+CPU cost as `resty.http / C FFI`. In these runs, the C FFI client is about
+`2.04x` to `2.63x` faster end-to-end, and `resty.http` spends about `2.70x` to
+`3.72x` as much estimated outbound client CPU time.
+
+## Detailed Local Measurements
+
+All target-worker CPU averages are above the default `95%` saturation threshold,
+and no `Non-2xx` responses were reported in these runs.
+
+| wrk2 connections | case | QPS | target worker CPU avg | saturation |
+| --- | --- | ---: | ---: | --- |
+| `10` | no-upstream baseline | `83998.04` | `108.6%` | valid |
+| `10` | C FFI client | `32831.68` | `109.1%` | valid |
+| `10` | `resty.http` | `16123.19` | `105.6%` | valid |
+| `100` | no-upstream baseline | `96155.73` | `103.9%` | valid |
+| `100` | C FFI client | `38582.72` | `110.1%` | valid |
+| `100` | `resty.http` | `14665.62` | `106.4%` | valid |
+
+The baseline-derived per-request estimates are:
+
+| wrk2 connections | baseline downstream + handler | C FFI total | C FFI estimated outbound | `resty.http` total | `resty.http` estimated outbound | outbound cost ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `10` | `11.905 us` | `30.458 us` | `18.553 us` | `62.022 us` | `50.117 us` | `2.70x` |
+| `100` | `10.400 us` | `25.918 us` | `15.519 us` | `68.187 us` | `57.787 us` | `3.72x` |
+
+The main project advantage shown by this benchmark is that the C FFI client
+keeps outbound HTTP request handling in Nginx C module code while preserving
+OpenResty worker nonblocking behavior and keepalive reuse. Under a saturated
+single target worker, this reduces Lua cosocket overhead on the upstream client
+path and leaves more of the worker CPU budget for application logic.
+
 ## Dependencies
 
 - OpenResty or Nginx binary built with `ngx_http_ffi_client_module`
