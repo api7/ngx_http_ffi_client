@@ -1,4 +1,29 @@
 ngx_addon_name=ngx_http_ffi_client_module
 
+ngx_http_ffi_client_lua_module_dir="${NGX_HTTP_LUA_MODULE_DIR:-}"
+
+if [ -z "$ngx_http_ffi_client_lua_module_dir" ]; then
+    if [ -f "$ngx_addon_dir/../lua-nginx-module/src/api/ngx_http_lua_api.h" ]; then
+        ngx_http_ffi_client_lua_module_dir="$(cd "$ngx_addon_dir/../lua-nginx-module" && pwd)"
+    else
+        ngx_http_ffi_client_lua_module_dir="/home/rain/git/lua-nginx-module"
+    fi
+fi
+
+if [ ! -f "$ngx_http_ffi_client_lua_module_dir/src/api/ngx_http_lua_api.h" ]; then
+    cat << END
+$0: error: ngx_http_ffi_client requires ngx_http_lua_api.h.
+Set NGX_HTTP_LUA_MODULE_DIR to a lua-nginx-module checkout, for example:
+NGX_HTTP_LUA_MODULE_DIR=/home/rain/git/lua-nginx-module
+END
+    exit 1
+fi
+
 HTTP_MODULES="$HTTP_MODULES ngx_http_ffi_client_module"
-NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/src/ngx_http_ffi_client_module.c"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
+    $ngx_addon_dir/src/ngx_http_ffi_client_module.c \
+    $ngx_addon_dir/src/ngx_http_ffi_client_lua.c \
+    $ngx_addon_dir/src/ngx_http_ffi_client_request.c \
+    $ngx_addon_dir/src/ngx_http_ffi_client_response.c"
+
+CORE_INCS="$CORE_INCS $ngx_http_ffi_client_lua_module_dir/src/api"
