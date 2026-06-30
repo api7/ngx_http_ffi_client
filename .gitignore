@@ -1,0 +1,12 @@
+docs/superpowers/
+
+objs/
+build/
+*.o
+*.so
+*.a
+*.dylib
+
+.DS_Store
+*.swp
+*.swo
