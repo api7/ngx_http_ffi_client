@@ -14,7 +14,7 @@ RESPONSE_SIZE="${RESPONSE_SIZE:-1024}"
 KEEPALIVE_POOL_SIZE="${KEEPALIVE_POOL_SIZE:-256}"
 KEEPALIVE_IDLE_TIMEOUT="${KEEPALIVE_IDLE_TIMEOUT:-60000}"
 WRK_THREADS="${WRK_THREADS:-2}"
-WRK_CONNECTIONS="${WRK_CONNECTIONS:-200}"
+WRK_CONNECTIONS="${WRK_CONNECTIONS:-10}"
 WRK_DURATION="${WRK_DURATION:-30s}"
 WRK_RATE="${WRK_RATE:-100000}"
 CPU_SATURATION_THRESHOLD="${CPU_SATURATION_THRESHOLD:-95}"
@@ -215,6 +215,7 @@ wait_url() {
 smoke_check() {
     printf 'Running smoke checks\n'
     "$CURL_BIN" -fsS "http://127.0.0.1:$TARGET_PORT/ready" >/dev/null
+    "$CURL_BIN" -fsS "http://127.0.0.1:$TARGET_PORT/bench/baseline" >/dev/null
     "$CURL_BIN" -fsS "http://127.0.0.1:$TARGET_PORT/smoke/ffi-short" >/dev/null
     "$CURL_BIN" -fsS "http://127.0.0.1:$TARGET_PORT/smoke/resty-http-short" >/dev/null
     "$CURL_BIN" -fsS "http://127.0.0.1:$TARGET_PORT/bench/ffi" >/dev/null
@@ -318,15 +319,34 @@ cpu_saturated() {
     ' "$samples"
 }
 
+case_stem() {
+    printf '%s' "$1" | sed -e 's/[^A-Za-z0-9_-]/_/g'
+}
+
+qps_file_for_label() {
+    local label="$1"
+
+    printf '%s/%s.qps' "$RUN_DIR" "$(case_stem "$label")"
+}
+
+extract_qps() {
+    local output="$1"
+
+    awk '/Requests\/sec:/ { qps = $2 } END { if (qps == "") exit 1; print qps }' \
+        "$output"
+}
+
 run_wrk_case() {
     local label="$1"
     local path="$2"
-    local worker_pid samples sampler_pid
+    local worker_pid stem samples output qps sampler_pid
 
     worker_pid="$(target_worker_pid)"
     [[ -n "$worker_pid" ]] || die "failed to find target worker pid"
 
-    samples="$RUN_DIR/${label// /_}.cpu"
+    stem="$(case_stem "$label")"
+    samples="$RUN_DIR/$stem.cpu"
+    output="$RUN_DIR/$stem.wrk"
 
     printf '\n== %s ==\n' "$label"
     sample_cpu_loop "$worker_pid" "$samples" &
@@ -340,10 +360,15 @@ run_wrk_case() {
         -L \
         -U \
         -s "$ROOT_DIR/benchmark/wrk/headers.lua" \
-        "http://127.0.0.1:$TARGET_PORT$path"
+        "http://127.0.0.1:$TARGET_PORT$path" | tee "$output"
 
     kill "$sampler_pid" >/dev/null 2>&1 || true
     wait "$sampler_pid" >/dev/null 2>&1 || true
+
+    qps="$(extract_qps "$output")" ||
+        die "failed to parse Requests/sec from $output"
+    printf '%s\n' "$qps" > "$(qps_file_for_label "$label")"
+    printf 'actual throughput: %s requests/sec\n' "$qps"
 
     printf 'target worker CPU: %s\n' "$(summarize_cpu "$samples")"
     if cpu_saturated "$samples"; then
@@ -353,6 +378,37 @@ run_wrk_case() {
         printf 'saturation: suspicious (average CPU < %s%%; increase wrk load or check upstream capacity)\n' \
             "$CPU_SATURATION_THRESHOLD"
     fi
+}
+
+print_outbound_estimate() {
+    local baseline_qps ffi_qps resty_qps
+
+    baseline_qps="$(cat "$(qps_file_for_label "baseline")")"
+    ffi_qps="$(cat "$(qps_file_for_label "C FFI keepalive")")"
+    resty_qps="$(cat "$(qps_file_for_label "resty.http keepalive")")"
+
+    awk -v baseline_qps="$baseline_qps" \
+        -v ffi_qps="$ffi_qps" \
+        -v resty_qps="$resty_qps" '
+        BEGIN {
+            baseline_total_us = 1000000 / baseline_qps
+            ffi_total_us = 1000000 / ffi_qps
+            resty_total_us = 1000000 / resty_qps
+            ffi_outbound_us = ffi_total_us - baseline_total_us
+            resty_outbound_us = resty_total_us - baseline_total_us
+
+            print ""
+            print "== Baseline-derived outbound estimate =="
+            printf "baseline downstream+handler: %.3f us/request\n", baseline_total_us
+            printf "C FFI total: %.3f us/request, estimated outbound: %.3f us/request\n", ffi_total_us, ffi_outbound_us
+            printf "resty.http total: %.3f us/request, estimated outbound: %.3f us/request\n", resty_total_us, resty_outbound_us
+
+            if (ffi_outbound_us <= 0 || resty_outbound_us <= 0) {
+                print "estimated outbound ratio: unavailable because baseline throughput is not above both client cases"
+            } else {
+                printf "estimated outbound ratio (resty.http / C FFI): %.2fx\n", resty_outbound_us / ffi_outbound_us
+            }
+        }'
 }
 
 prepare_configs
@@ -374,5 +430,7 @@ wait_url "http://127.0.0.1:$TARGET_PORT/ready"
 
 smoke_check
 
+run_wrk_case "baseline" "/bench/baseline"
 run_wrk_case "C FFI keepalive" "/bench/ffi"
 run_wrk_case "resty.http keepalive" "/bench/resty-http"
+print_outbound_estimate

@@ -22,6 +22,7 @@ my $runner = File::Spec->catfile($root, 'benchmark', 'run.sh');
 my $target_template = File::Spec->catfile($root, 'benchmark', 'conf', 'target.nginx.conf');
 my $upstream_template = File::Spec->catfile($root, 'benchmark', 'conf', 'upstream.nginx.conf');
 my $wrk_headers = File::Spec->catfile($root, 'benchmark', 'wrk', 'headers.lua');
+my $readme = File::Spec->catfile($root, 'benchmark', 'README.md');
 
 ok(-f $makefile, 'Makefile exists');
 like(slurp($makefile), qr/^bench:\s*$/m, 'Makefile defines bench target');
@@ -32,12 +33,20 @@ like(slurp($runner), qr/BENCH_DRY_RUN/, 'runner supports dry-run mode');
 like(slurp($runner), qr/CPU_SATURATION_THRESHOLD/, 'runner checks CPU saturation');
 like(slurp($runner), qr/WRK2_BIN/, 'runner uses wrk2 binary configuration');
 like(slurp($runner), qr/WRK_RATE/, 'runner supports wrk2 target rate');
+like(slurp($runner), qr/WRK_CONNECTIONS="\$\{WRK_CONNECTIONS:-10\}"/,
+    'runner defaults wrk2 connections to 10');
 like(slurp($runner), qr/\s-U\s/, 'runner enables wrk2 uncorrected latency output');
 like(slurp($runner), qr/\s-R\s+"\$WRK_RATE"/, 'runner passes wrk2 target rate');
+like(slurp($runner), qr/run_wrk_case "baseline" "\/bench\/baseline"/,
+    'runner runs baseline case first');
+like(slurp($runner), qr/print_outbound_estimate/,
+    'runner prints baseline-derived outbound estimate');
 
 ok(-f $target_template, 'target nginx template exists');
 ok(-f $upstream_template, 'upstream nginx template exists');
 ok(-f $wrk_headers, 'wrk headers script exists');
+like(slurp($readme), qr/\| `WRK_CONNECTIONS` \| `10` \|/,
+    'README documents wrk2 connection default');
 
 my $cmd = join ' ',
     'cd', quotemeta($root), '&&',
@@ -71,6 +80,7 @@ ok(-f $rendered_target, 'dry-run renders target nginx config');
 ok(-f $rendered_upstream, 'dry-run renders upstream nginx config');
 
 my $target_conf = slurp($rendered_target);
+like($target_conf, qr/location = \/bench\/baseline/, 'target config has baseline benchmark endpoint');
 like($target_conf, qr/location = \/bench\/ffi/, 'target config has C FFI benchmark endpoint');
 like($target_conf, qr/location = \/bench\/resty-http/, 'target config has resty.http benchmark endpoint');
 like($target_conf, qr/worker_processes 1;/, 'target config uses one worker');

@@ -7,6 +7,11 @@ This directory contains the local benchmark for comparing
 The benchmark measures maximum QPS when the target OpenResty worker is pinned to
 one CPU core and that core is saturated. It is not a fixed-rate latency test.
 
+The runner measures a baseline first. The baseline endpoint does not contact the
+upstream; it only returns a response body with the same size as the upstream
+response. The C FFI and `resty.http` cases are then compared against this
+baseline to estimate the outbound HTTP client cost.
+
 ## Dependencies
 
 - OpenResty or Nginx binary built with `ngx_http_ffi_client_module`
@@ -33,6 +38,12 @@ make bench
 `wrk2` sends requests to the target instance. The target instance sends one
 outbound HTTP/1.1 request to the upstream per inbound request.
 
+The benchmark cases run in this order:
+
+1. `/bench/baseline`: target worker returns a fixed body without upstream IO.
+2. `/bench/ffi`: target worker calls `resty.ngx_http_ffi_client`.
+3. `/bench/resty-http`: target worker calls `resty.http`.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -47,7 +58,7 @@ outbound HTTP/1.1 request to the upstream per inbound request.
 | `KEEPALIVE_POOL_SIZE` | `256` | keepalive pool size for both client paths |
 | `KEEPALIVE_IDLE_TIMEOUT` | `60000` | keepalive idle timeout in milliseconds |
 | `WRK_THREADS` | `2` | wrk2 thread count |
-| `WRK_CONNECTIONS` | `200` | wrk2 connection count |
+| `WRK_CONNECTIONS` | `10` | wrk2 connection count |
 | `WRK_DURATION` | `30s` | official benchmark duration |
 | `WRK_RATE` | `100000` | wrk2 target request rate, set high enough to saturate the target worker |
 | `WRK2_BIN` | `wrk` | wrk2 executable path |
@@ -57,6 +68,22 @@ The runner invokes wrk2 with `-R "$WRK_RATE" -L -U`. The `-L` output reports
 wrk2's latency distribution and `-U` reports the uncorrected latency
 distribution. For this benchmark, set `WRK_RATE` above the expected maximum QPS
 so the single target worker remains CPU-bound.
+
+## Baseline-Derived Estimate
+
+The QPS results include downstream client-to-OpenResty overhead. To estimate the
+outbound HTTP client cost, the runner treats single-core CPU time per request as
+approximately `1 / QPS`:
+
+```text
+baseline_us = 1_000_000 / baseline_qps
+ffi_outbound_us = 1_000_000 / ffi_qps - baseline_us
+resty_outbound_us = 1_000_000 / resty_http_qps - baseline_us
+ratio = resty_outbound_us / ffi_outbound_us
+```
+
+This is still an estimate, but it removes the common downstream and simple
+response path from the comparison.
 
 ## Valid Runs
 
