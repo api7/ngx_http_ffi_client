@@ -17,7 +17,7 @@ jobs:
     env:
       OPENRESTY_VERSION: 1.31.1.1
       PCRE2_VERSION: "10.45"
-      OPENRESTY_PREFIX: ${{ runner.temp }}/openresty
+      OPENRESTY_PREFIX: /tmp/openresty
       TEST_NGINX_LUA_PACKAGE_PATH: ${{ github.workspace }}/lib/?.lua;${{ github.workspace }}/lib/?/init.lua
 
     steps:
@@ -44,7 +44,7 @@ jobs:
             zlib1g-dev
 
       - name: Download OpenResty and PCRE2
-        working-directory: ${{ runner.temp }}
+        working-directory: /tmp
         run: |
           curl -fsSLO "https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz"
           tar -zxf "openresty-${OPENRESTY_VERSION}.tar.gz"
@@ -55,18 +55,18 @@ jobs:
           git clone --depth 1 https://github.com/openresty/test-nginx.git test-nginx
 
       - name: Configure OpenResty with addon
-        working-directory: ${{ runner.temp }}/openresty-${{ env.OPENRESTY_VERSION }}
+        working-directory: /tmp/openresty-${{ env.OPENRESTY_VERSION }}
         run: |
           ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)"
           test -n "$ngx_lua_dir"
 
           NGX_HTTP_LUA_MODULE_DIR="$ngx_lua_dir" ./configure \
             --prefix="$OPENRESTY_PREFIX" \
-            --with-pcre="${RUNNER_TEMP}/pcre2-${PCRE2_VERSION}" \
+            --with-pcre="/tmp/pcre2-${PCRE2_VERSION}" \
             --add-module="$GITHUB_WORKSPACE"
 
       - name: Build and install OpenResty
-        working-directory: ${{ runner.temp }}/openresty-${{ env.OPENRESTY_VERSION }}
+        working-directory: /tmp/openresty-${{ env.OPENRESTY_VERSION }}
         run: |
           make -j2
           make install
@@ -79,6 +79,6 @@ jobs:
 
       - name: Run integration tests
         env:
-          PERL5LIB: ${{ runner.temp }}/test-nginx/lib
+          PERL5LIB: /tmp/test-nginx/lib
           TEST_NGINX_BINARY: ${{ env.OPENRESTY_PREFIX }}/nginx/sbin/nginx
         run: prove -r t
