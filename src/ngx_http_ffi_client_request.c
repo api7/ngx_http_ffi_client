@@ -534,6 +534,11 @@ ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op)
         ngx_del_timer(c->write);
     }
 
+    if (ngx_http_ffi_client_check_connect(op) != NGX_OK) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+        return NGX_ERROR;
+    }
+
     op->state = NGX_HTTP_FFI_CLIENT_READING;
 
     return ngx_http_ffi_client_do_read(op);
@@ -589,6 +594,11 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
         if (n == 0) {
             ngx_http_ffi_client_finalize(op, NGX_ERROR,
                 "upstream closed before complete response");
+            return NGX_ERROR;
+        }
+
+        if (op->parser.raw == NULL) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
             return NGX_ERROR;
         }
 

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      OPENRESTY_VERSION: 1.31.1.1
+      PCRE2_VERSION: "10.45"
+      OPENRESTY_PREFIX: ${{ runner.temp }}/openresty
+      TEST_NGINX_LUA_PACKAGE_PATH: ${{ github.workspace }}/lib/?.lua;${{ github.workspace }}/lib/?/init.lua
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libipc-run-perl \
+            liblist-moreutils-perl \
+            libssl-dev \
+            libtest-base-perl \
+            libtest-longstring-perl \
+            libtext-diff-perl \
+            libwww-perl \
+            make \
+            perl \
+            zlib1g-dev
+
+      - name: Download OpenResty and PCRE2
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSLO "https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz"
+          tar -zxf "openresty-${OPENRESTY_VERSION}.tar.gz"
+
+          curl -fsSLO "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"
+          tar -zxf "pcre2-${PCRE2_VERSION}.tar.gz"
+
+          git clone --depth 1 https://github.com/openresty/test-nginx.git test-nginx
+
+      - name: Configure OpenResty with addon
+        working-directory: ${{ runner.temp }}/openresty-${{ env.OPENRESTY_VERSION }}
+        run: |
+          ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)"
+          test -n "$ngx_lua_dir"
+
+          NGX_HTTP_LUA_MODULE_DIR="$ngx_lua_dir" ./configure \
+            --prefix="$OPENRESTY_PREFIX" \
+            --with-pcre="${RUNNER_TEMP}/pcre2-${PCRE2_VERSION}" \
+            --add-module="$GITHUB_WORKSPACE"
+
+      - name: Build and install OpenResty
+        working-directory: ${{ runner.temp }}/openresty-${{ env.OPENRESTY_VERSION }}
+        run: |
+          make -j2
+          make install
+
+      - name: Verify Lua module loads
+        run: |
+          LUA_PATH="${TEST_NGINX_LUA_PACKAGE_PATH};;" \
+            "$OPENRESTY_PREFIX/bin/resty" \
+            -e 'local client = require("resty.ngx_http_ffi_client"); assert(type(client.request) == "function")'
+
+      - name: Run integration tests
+        env:
+          PERL5LIB: ${{ runner.temp }}/test-nginx/lib
+          TEST_NGINX_BINARY: ${{ env.OPENRESTY_PREFIX }}/nginx/sbin/nginx
+        run: prove -r t

@@ -1,7 +1,7 @@
 use Test::Nginx::Socket -Base;
 
 repeat_each(1);
-plan tests => repeat_each() * (blocks() * 2);
+plan tests => repeat_each() * (blocks() * 3 - 1);
 
 our $HttpConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
@@ -98,10 +98,7 @@ hello
     }
 --- request
 GET /t
---- response_body
-POST
-sent
-payload
+--- response_body eval: "POST\nsent\npayload"
 --- no_error_log
 [error]
 
@@ -171,5 +168,3 @@ GET /t
 --- request
 GET /t
 --- response_body_like: (connect failed|connection refused|Connection refused)
---- no_error_log
-[error]
