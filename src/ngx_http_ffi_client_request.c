@@ -1,4 +1,7 @@
 #include "ngx_http_ffi_client.h"
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+#include "ngx_http_ffi_client_hyper.h"
+#endif
 
 
 static ngx_int_t ngx_http_ffi_client_get_peer(ngx_peer_connection_t *pc,
@@ -8,6 +11,9 @@ static ngx_int_t ngx_http_ffi_client_set_err(u_char *err, size_t *errlen,
 static ngx_int_t ngx_http_ffi_client_set_op_err(ngx_http_ffi_client_op_t *op,
     const char *msg);
 static ngx_uint_t ngx_http_ffi_client_has_crlf(u_char *data, size_t len);
+static ngx_int_t ngx_http_ffi_client_validate_request(
+    ngx_http_ffi_client_ffi_req_t *req, u_char *err, size_t *errlen);
+#if !(NGX_HTTP_FFI_CLIENT_USE_HYPER)
 static ngx_uint_t ngx_http_ffi_client_header_is_reserved(
     ngx_http_ffi_client_ffi_str_t *key);
 static ngx_int_t ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
@@ -16,6 +22,7 @@ static ngx_int_t ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
 static ngx_int_t ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_buf_t **buf, ngx_str_t *host,
     u_char *err, size_t *errlen);
+#endif
 static ngx_int_t ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_op_t *op,
     u_char *err, size_t *errlen);
@@ -25,7 +32,15 @@ static ngx_int_t ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
 static ngx_int_t ngx_http_ffi_client_prepare_connection(
     ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op);
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+static ngx_int_t ngx_http_ffi_client_do_hyper_write(
+    ngx_http_ffi_client_op_t *op);
+#endif
 static ngx_int_t ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op);
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+static ngx_int_t ngx_http_ffi_client_do_hyper_read(
+    ngx_http_ffi_client_op_t *op);
+#endif
 static void ngx_http_ffi_client_cleanup(void *data);
 static void ngx_http_ffi_client_close(ngx_http_ffi_client_op_t *op);
 static void ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op,
@@ -90,6 +105,17 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
                                            "no coroutine context found");
     }
 
+    if (ngx_http_ffi_client_validate_request(req, err, errlen) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    op->hyper = ngx_http_ffi_client_hyper_new(req);
+    if (op->hyper == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "failed to create hyper engine");
+    }
+#else
     if (ngx_http_ffi_client_response_parser_init(r->pool, &op->parser)
         != NGX_OK)
     {
@@ -109,8 +135,13 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     {
         return NGX_ERROR;
     }
+#endif
 
     if (ngx_http_ffi_client_parse_peer(r, req, op, err, errlen) != NGX_OK) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+        ngx_http_ffi_client_hyper_free(op->hyper);
+        op->hyper = NULL;
+#endif
         return NGX_ERROR;
     }
 
@@ -132,6 +163,9 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         }
 
         if (rc == NGX_ERROR) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+            ngx_http_ffi_client_close(op);
+#endif
             return NGX_ERROR;
         }
     }
@@ -143,14 +177,23 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     rc = ngx_event_connect_peer(&op->peer);
 
     if (rc == NGX_ERROR) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+        ngx_http_ffi_client_close(op);
+#endif
         return ngx_http_ffi_client_set_err(err, errlen, "connect failed");
     }
 
     if (rc == NGX_BUSY) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+        ngx_http_ffi_client_close(op);
+#endif
         return ngx_http_ffi_client_set_err(err, errlen, "no live connection");
     }
 
     if (rc == NGX_DECLINED) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+        ngx_http_ffi_client_close(op);
+#endif
         return ngx_http_ffi_client_set_err(err, errlen, "connect failed");
     }
 
@@ -225,6 +268,68 @@ ngx_http_ffi_client_has_crlf(u_char *data, size_t len)
     return 0;
 }
 
+
+static ngx_int_t
+ngx_http_ffi_client_validate_request(ngx_http_ffi_client_ffi_req_t *req,
+    u_char *err, size_t *errlen)
+{
+    ngx_uint_t                        i;
+    ngx_http_ffi_client_ffi_header_t *h;
+
+    if (req->host.len == 0 || req->host.data == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "host is required");
+    }
+
+    if (ngx_http_ffi_client_has_crlf(req->host.data, req->host.len)) {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid host");
+    }
+
+    if (req->method.len == 0 || req->method.data == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "method is required");
+    }
+
+    if (req->path.len == 0 || req->path.data == NULL || req->path.data[0] != '/')
+    {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid path");
+    }
+
+    if (req->body.len != 0 && req->body.data == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid request");
+    }
+
+    if (ngx_http_ffi_client_has_crlf(req->method.data, req->method.len)
+        || ngx_http_ffi_client_has_crlf(req->path.data, req->path.len)
+        || ngx_http_ffi_client_has_crlf(req->body.data, req->body.len))
+    {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid request");
+    }
+
+    for (i = 0; i < req->headers_len; i++) {
+        h = &req->headers[i];
+
+        if (h->key.len == 0 || h->key.data == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid request header");
+        }
+
+        if (h->value.len != 0 && h->value.data == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid request header");
+        }
+
+        if (ngx_http_ffi_client_has_crlf(h->key.data, h->key.len)
+            || ngx_http_ffi_client_has_crlf(h->value.data, h->value.len))
+        {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "invalid request header");
+        }
+    }
+
+    return NGX_OK;
+}
+
+
+#if !(NGX_HTTP_FFI_CLIENT_USE_HYPER)
 
 static ngx_uint_t
 ngx_http_ffi_client_header_is_reserved(ngx_http_ffi_client_ffi_str_t *key)
@@ -390,6 +495,8 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
 
     return NGX_OK;
 }
+
+#endif
 
 
 static ngx_int_t
@@ -562,6 +669,9 @@ ngx_http_ffi_client_prepare_connection(ngx_http_ffi_client_op_t *op)
 static ngx_int_t
 ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op)
 {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    return ngx_http_ffi_client_do_hyper_write(op);
+#else
     ssize_t           n;
     ngx_connection_t *c;
 
@@ -596,12 +706,89 @@ ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op)
     op->state = NGX_HTTP_FFI_CLIENT_READING;
 
     return ngx_http_ffi_client_do_read(op);
+#endif
 }
+
+
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+
+static ngx_int_t
+ngx_http_ffi_client_do_hyper_write(ngx_http_ffi_client_op_t *op)
+{
+    ssize_t                                  n;
+    size_t                                   len;
+    const u_char                            *data;
+    ngx_connection_t                        *c;
+    ngx_http_ffi_client_hyper_poll_result_t  result;
+
+    c = op->peer.connection;
+
+    if (ngx_http_ffi_client_hyper_poll(op->hyper, &result) != 0) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "hyper poll failed");
+        return NGX_ERROR;
+    }
+
+    if (result.error) {
+        op->errlen = sizeof(op->err);
+        (void) ngx_http_ffi_client_hyper_set_error(op->hyper, op->err,
+                                                   &op->errlen);
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+        return NGX_ERROR;
+    }
+
+    for ( ;; ) {
+        if (ngx_http_ffi_client_hyper_output(op->hyper, &data, &len) != 0) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, "hyper output failed");
+            return NGX_ERROR;
+        }
+
+        if (len == 0) {
+            break;
+        }
+
+        n = c->send(c, (u_char *) data, len);
+
+        if (n > 0) {
+            if (ngx_http_ffi_client_hyper_consume_output(op->hyper, n) != 0) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                             "hyper output consume failed");
+                return NGX_ERROR;
+            }
+
+            continue;
+        }
+
+        if (n == NGX_AGAIN) {
+            return ngx_http_ffi_client_handle_write_wait(op);
+        }
+
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to send request");
+        return NGX_ERROR;
+    }
+
+    if (c->write->timer_set) {
+        ngx_del_timer(c->write);
+    }
+
+    if (ngx_http_ffi_client_check_connect(op) != NGX_OK) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+        return NGX_ERROR;
+    }
+
+    op->state = NGX_HTTP_FFI_CLIENT_READING;
+
+    return ngx_http_ffi_client_do_read(op);
+}
+
+#endif
 
 
 static ngx_int_t
 ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
 {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    return ngx_http_ffi_client_do_hyper_read(op);
+#else
     ssize_t           n;
     ngx_int_t         rc;
     ngx_connection_t *c;
@@ -660,7 +847,116 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
         ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to read response");
         return NGX_ERROR;
     }
+#endif
 }
+
+
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+
+static ngx_int_t
+ngx_http_ffi_client_do_hyper_read(ngx_http_ffi_client_op_t *op)
+{
+    ssize_t                                  n;
+    ngx_int_t                                rc;
+    ngx_connection_t                        *c;
+    u_char                                   buf[4096];
+    ngx_http_ffi_client_hyper_poll_result_t  result;
+
+    c = op->peer.connection;
+
+    for ( ;; ) {
+        n = c->recv(c, buf, sizeof(buf));
+
+        if (n > 0) {
+            if (ngx_http_ffi_client_hyper_feed(op->hyper, buf, n) != 0) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                             "hyper feed failed");
+                return NGX_ERROR;
+            }
+
+            if (ngx_http_ffi_client_hyper_poll(op->hyper, &result) != 0) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                             "hyper poll failed");
+                return NGX_ERROR;
+            }
+
+            if (result.error) {
+                op->errlen = sizeof(op->err);
+                (void) ngx_http_ffi_client_hyper_set_error(op->hyper, op->err,
+                                                           &op->errlen);
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            if (result.done) {
+                op->errlen = sizeof(op->err);
+                rc = ngx_http_ffi_client_hyper_to_ffi(op->r->pool, op->hyper,
+                                                      op->ffi_resp, op->err,
+                                                      &op->errlen);
+                if (rc != NGX_OK) {
+                    ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                    return NGX_ERROR;
+                }
+
+                op->ffi_resp->reused = op->reused;
+                ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
+                return NGX_OK;
+            }
+
+            continue;
+        }
+
+        if (n == NGX_AGAIN) {
+            return ngx_http_ffi_client_handle_read_wait(op);
+        }
+
+        if (n == 0) {
+            if (ngx_http_ffi_client_hyper_close_read(op->hyper) != 0) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                             "hyper close read failed");
+                return NGX_ERROR;
+            }
+
+            if (ngx_http_ffi_client_hyper_poll(op->hyper, &result) != 0) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                             "hyper poll failed");
+                return NGX_ERROR;
+            }
+
+            if (result.error) {
+                op->errlen = sizeof(op->err);
+                (void) ngx_http_ffi_client_hyper_set_error(op->hyper, op->err,
+                                                           &op->errlen);
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            if (result.done) {
+                op->errlen = sizeof(op->err);
+                rc = ngx_http_ffi_client_hyper_to_ffi(op->r->pool, op->hyper,
+                                                      op->ffi_resp, op->err,
+                                                      &op->errlen);
+                if (rc != NGX_OK) {
+                    ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                    return NGX_ERROR;
+                }
+
+                op->ffi_resp->reused = op->reused;
+                ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
+                return NGX_OK;
+            }
+
+            ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                "upstream closed before complete response");
+            return NGX_ERROR;
+        }
+
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to read response");
+        return NGX_ERROR;
+    }
+}
+
+#endif
 
 
 static ngx_int_t
@@ -723,6 +1019,13 @@ ngx_http_ffi_client_cleanup(void *data)
 static void
 ngx_http_ffi_client_close(ngx_http_ffi_client_op_t *op)
 {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    if (op->hyper != NULL) {
+        ngx_http_ffi_client_hyper_free(op->hyper);
+        op->hyper = NULL;
+    }
+#endif
+
     ngx_http_ffi_client_keepalive_close_active(op);
 }
 
@@ -731,7 +1034,8 @@ static void
 ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     const char *msg)
 {
-    lua_State *co;
+    lua_State  *co;
+    ngx_uint_t  saved;
 
     if (op->resumed) {
         return;
@@ -745,12 +1049,30 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
         ngx_http_ffi_client_set_op_err(op, msg);
     }
 
+    saved = 0;
+
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    if (rc == NGX_OK
+        && op->keepalive
+        && !ngx_http_ffi_client_hyper_connection_close(op->hyper)
+        && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
+    {
+        saved = 1;
+    }
+#else
     if (rc == NGX_OK
         && op->keepalive
         && !op->parser.connection_close
         && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
     {
-        /* saved for reuse */
+        saved = 1;
+    }
+#endif
+
+    if (saved) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+        ngx_http_ffi_client_close(op);
+#endif
 
     } else {
         ngx_http_ffi_client_close(op);
