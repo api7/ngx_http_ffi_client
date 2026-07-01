@@ -22,9 +22,10 @@ fi
 
 if [ "$ngx_http_ffi_client_use_hyper" = "1" ]; then
     ngx_http_ffi_client_hyper_manifest="$ngx_addon_dir/rust/hyper-http11/Cargo.toml"
-    ngx_http_ffi_client_hyper_lib="$ngx_addon_dir/rust/hyper-http11/target/release/libngx_http_ffi_client_hyper.a"
+    ngx_http_ffi_client_hyper_target="$ngx_addon_dir/rust/hyper-http11/target"
+    ngx_http_ffi_client_hyper_lib="$ngx_http_ffi_client_hyper_target/release/libngx_http_ffi_client_hyper.a"
 
-    cargo build --release --manifest-path "$ngx_http_ffi_client_hyper_manifest" || exit 1
+    CARGO_TARGET_DIR="$ngx_http_ffi_client_hyper_target" cargo build --release --manifest-path "$ngx_http_ffi_client_hyper_manifest" || exit 1
 
     if [ ! -f "$ngx_http_ffi_client_hyper_lib" ]; then
         cat << END
