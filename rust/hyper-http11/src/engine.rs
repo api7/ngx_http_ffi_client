@@ -5,7 +5,7 @@ use crate::io::BufferedIo;
 use crate::waker::noop_waker;
 use bytes::{Buf, Bytes};
 use http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
-use http::{HeaderName, HeaderValue, Request, Response as HttpResponse, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response as HttpResponse, Uri, Version};
 use http_body_util::Full;
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::http1;
@@ -165,12 +165,7 @@ impl Engine {
                         (key.as_str().as_bytes().to_vec(), value.as_bytes().to_vec())
                     })
                     .collect();
-                let connection_close = parts
-                    .headers
-                    .get(CONNECTION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(connection_has_close)
-                    .unwrap_or(false);
+                let connection_close = connection_should_close(parts.version, &parts.headers);
 
                 self.response = Some(Response {
                     status: parts.status.as_u16(),
@@ -340,10 +335,25 @@ fn is_engine_managed_request_header(name: &HeaderName) -> bool {
     name == HOST || name == CONNECTION || name == CONTENT_LENGTH || name == TRANSFER_ENCODING
 }
 
-fn connection_has_close(value: &str) -> bool {
+fn connection_should_close(version: Version, headers: &HeaderMap) -> bool {
+    match version {
+        Version::HTTP_10 => !connection_has_token(headers, "keep-alive"),
+        _ => connection_has_token(headers, "close"),
+    }
+}
+
+fn connection_has_token(headers: &HeaderMap, needle: &str) -> bool {
+    headers
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| connection_has_token_value(value, needle))
+}
+
+fn connection_has_token_value(value: &str, needle: &str) -> bool {
     value
         .split(',')
-        .any(|token| token.trim().eq_ignore_ascii_case("close"))
+        .any(|token| token.trim().eq_ignore_ascii_case(needle))
 }
 
 fn with_context<T>(f: impl FnOnce(&mut Context<'_>) -> T) -> T {
@@ -534,5 +544,50 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"chunked");
         assert!(response.connection_close);
+    }
+
+    #[test]
+    fn connection_close_follows_http_version_defaults() {
+        for (raw, expected) in [
+            (
+                b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                true,
+            ),
+            (
+                b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+                    .as_slice(),
+                false,
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                false,
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+                true,
+            ),
+        ] {
+            let req = TestReq::new("GET", "/version", b"", &[]);
+            let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+            let _ = engine.poll();
+            engine.consume_output(engine.output_len());
+            engine.feed(raw);
+
+            for _ in 0..8 {
+                if engine.poll().done != 0 {
+                    break;
+                }
+            }
+
+            assert!(engine.done(), "{}", String::from_utf8_lossy(raw));
+            let response = engine.response().expect("response");
+            assert_eq!(
+                response.connection_close,
+                expected,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
     }
 }

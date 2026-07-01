@@ -1052,13 +1052,10 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     saved = 0;
 
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
-    if (rc == NGX_OK
-        && op->keepalive
-        && !ngx_http_ffi_client_hyper_connection_close(op->hyper)
-        && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
-    {
-        saved = 1;
-    }
+    /*
+     * Until the hyper engine can prove no unread or internal buffered bytes
+     * remain, hyper connections are closed after each response.
+     */
 #else
     if (rc == NGX_OK
         && op->keepalive
