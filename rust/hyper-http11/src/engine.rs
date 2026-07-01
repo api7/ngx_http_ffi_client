@@ -88,6 +88,7 @@ impl Engine {
             self.poll_response_body(cx);
             self.poll_response_future(cx);
             self.poll_connection(cx);
+            self.poll_response_body(cx);
         });
 
         self.poll_result()
@@ -540,6 +541,52 @@ mod tests {
         }
 
         assert!(engine.done());
+        let response = engine.response().expect("response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"chunked");
+        assert!(response.connection_close);
+    }
+
+    #[test]
+    fn completes_chunked_response_before_read_close() {
+        let req = TestReq::new("GET", "/chunked", b"", &[]);
+        let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+        let _ = engine.poll();
+        engine.consume_output(engine.output_len());
+        engine.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\nchunked\r\n0\r\n\r\n",
+        );
+
+        for _ in 0..8 {
+            if engine.poll().done != 0 {
+                break;
+            }
+        }
+
+        assert!(engine.done());
+        let response = engine.response().expect("response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"chunked");
+        assert!(response.connection_close);
+    }
+
+    #[test]
+    fn completes_chunked_response_with_wrapper_poll_sequence() {
+        let req = TestReq::new("GET", "/chunked", b"", &[]);
+        let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+        let _ = engine.poll();
+        engine.consume_output(engine.output_len());
+        engine.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\nchunked\r\n0\r\n\r\n",
+        );
+
+        let _ = engine.poll();
+        engine.close_read();
+        let poll = engine.poll();
+
+        assert_eq!(poll.done, 1);
         let response = engine.response().expect("response");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"chunked");
