@@ -74,6 +74,9 @@ int ngx_http_ffi_client_hyper_error(const ngx_http_ffi_client_hyper_t *engine,
 ngx_int_t ngx_http_ffi_client_hyper_to_ffi(ngx_pool_t *pool,
     const ngx_http_ffi_client_hyper_t *engine,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
+ngx_int_t ngx_http_ffi_client_hyper_to_ffi_borrowed(ngx_pool_t *pool,
+    const ngx_http_ffi_client_hyper_t *engine,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
 ngx_int_t ngx_http_ffi_client_hyper_set_error(
     const ngx_http_ffi_client_hyper_t *engine, u_char *err, size_t *errlen);
 

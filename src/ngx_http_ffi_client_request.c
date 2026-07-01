@@ -40,6 +40,11 @@ static ngx_int_t ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op);
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
 static ngx_int_t ngx_http_ffi_client_do_hyper_read(
     ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_hyper_to_response(
+    ngx_http_ffi_client_op_t *op);
+#if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+static void ngx_http_ffi_client_hyper_cleanup(void *data);
+#endif
 #endif
 static void ngx_http_ffi_client_cleanup(void *data);
 static void ngx_http_ffi_client_close(ngx_http_ffi_client_op_t *op);
@@ -59,6 +64,9 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     ngx_int_t                 rc;
     ngx_connection_t         *c;
     ngx_http_ffi_client_op_t *op;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+    ngx_pool_cleanup_t       *cln;
+#endif
 
     if (req == NULL || resp == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "bad request");
@@ -115,6 +123,17 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen,
                                            "failed to create hyper engine");
     }
+#if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+    cln = ngx_pool_cleanup_add(r->pool, 0);
+    if (cln == NULL) {
+        ngx_http_ffi_client_hyper_free(op->hyper);
+        op->hyper = NULL;
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    cln->handler = ngx_http_ffi_client_hyper_cleanup;
+    cln->data = op;
+#endif
 #else
     if (ngx_http_ffi_client_response_parser_init(r->pool, &op->parser)
         != NGX_OK)
@@ -889,16 +908,12 @@ ngx_http_ffi_client_do_hyper_read(ngx_http_ffi_client_op_t *op)
             }
 
             if (result.done) {
-                op->errlen = sizeof(op->err);
-                rc = ngx_http_ffi_client_hyper_to_ffi(op->r->pool, op->hyper,
-                                                      op->ffi_resp, op->err,
-                                                      &op->errlen);
+                rc = ngx_http_ffi_client_hyper_to_response(op);
                 if (rc != NGX_OK) {
                     ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
                     return NGX_ERROR;
                 }
 
-                op->ffi_resp->reused = op->reused;
                 ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
                 return NGX_OK;
             }
@@ -932,16 +947,12 @@ ngx_http_ffi_client_do_hyper_read(ngx_http_ffi_client_op_t *op)
             }
 
             if (result.done) {
-                op->errlen = sizeof(op->err);
-                rc = ngx_http_ffi_client_hyper_to_ffi(op->r->pool, op->hyper,
-                                                      op->ffi_resp, op->err,
-                                                      &op->errlen);
+                rc = ngx_http_ffi_client_hyper_to_response(op);
                 if (rc != NGX_OK) {
                     ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
                     return NGX_ERROR;
                 }
 
-                op->ffi_resp->reused = op->reused;
                 ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
                 return NGX_OK;
             }
@@ -955,6 +966,59 @@ ngx_http_ffi_client_do_hyper_read(ngx_http_ffi_client_op_t *op)
         return NGX_ERROR;
     }
 }
+
+
+static ngx_int_t
+ngx_http_ffi_client_hyper_to_response(ngx_http_ffi_client_op_t *op)
+{
+    ngx_int_t  rc;
+
+    op->errlen = sizeof(op->err);
+
+#if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+    /*
+     * Benchmark-only A/B gate: keep response bytes borrowed from the Rust
+     * engine until the request pool cleanup runs.
+     *
+     * TODO: replace this with an explicit production ownership contract before
+     * exposing a no-copy response path outside benchmark builds.
+     */
+    rc = ngx_http_ffi_client_hyper_to_ffi_borrowed(op->r->pool, op->hyper,
+                                                   op->ffi_resp, op->err,
+                                                   &op->errlen);
+#else
+    rc = ngx_http_ffi_client_hyper_to_ffi(op->r->pool, op->hyper,
+                                          op->ffi_resp, op->err,
+                                          &op->errlen);
+#endif
+
+    if (rc != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+#if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+    op->hyper_borrow_response = 1;
+#endif
+    op->ffi_resp->reused = op->reused;
+
+    return NGX_OK;
+}
+
+
+#if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
+
+static void
+ngx_http_ffi_client_hyper_cleanup(void *data)
+{
+    ngx_http_ffi_client_op_t *op = data;
+
+    if (op != NULL && op->hyper != NULL) {
+        ngx_http_ffi_client_hyper_free(op->hyper);
+        op->hyper = NULL;
+    }
+}
+
+#endif
 
 #endif
 
@@ -1085,14 +1149,20 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     }
 #endif
 
-    if (saved) {
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
-        ngx_http_ffi_client_close(op);
-#endif
+    if (rc == NGX_OK && op->hyper_borrow_response) {
+        if (!saved) {
+            ngx_http_ffi_client_keepalive_close_active(op);
+        }
 
     } else {
         ngx_http_ffi_client_close(op);
     }
+#else
+    if (!saved) {
+        ngx_http_ffi_client_close(op);
+    }
+#endif
 
     co = ngx_http_lua_get_co_ctx_vm(op->coctx);
 

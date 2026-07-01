@@ -8,6 +8,7 @@ openresty_version="${OPENRESTY_VERSION:-1.31.1.1}"
 pcre2_version="${PCRE2_VERSION:-10.45}"
 workdir="${NGX_HTTP_FFI_CLIENT_BUILD_DIR:-/tmp/ngx_http_ffi_client_build}"
 hyper_keepalive_bench="${NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH:-0}"
+hyper_borrow_response_bench="${NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH:-0}"
 
 case "$backend" in
   c|hyper) ;;
@@ -25,8 +26,27 @@ case "$hyper_keepalive_bench" in
     ;;
 esac
 
+case "$hyper_borrow_response_bench" in
+  0|1) ;;
+  *)
+    echo "NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$backend" != "hyper" ] && [ "$hyper_borrow_response_bench" = "1" ]; then
+  echo "NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH requires hyper backend" >&2
+  exit 2
+fi
+
+if [ "$hyper_borrow_response_bench" = "1" ]; then
+  hyper_keepalive_bench=1
+fi
+
 build_name="$backend"
-if [ "$backend" = "hyper" ] && [ "$hyper_keepalive_bench" = "1" ]; then
+if [ "$backend" = "hyper" ] && [ "$hyper_borrow_response_bench" = "1" ]; then
+  build_name="hyper-borrow-response-bench"
+elif [ "$backend" = "hyper" ] && [ "$hyper_keepalive_bench" = "1" ]; then
   build_name="hyper-keepalive-bench"
 fi
 
@@ -65,6 +85,9 @@ if [ "$backend" = "hyper" ]; then
   extra_env+=(NGX_HTTP_FFI_CLIENT_USE_HYPER=1)
   if [ "$hyper_keepalive_bench" = "1" ]; then
     extra_env+=(NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH=1)
+  fi
+  if [ "$hyper_borrow_response_bench" = "1" ]; then
+    extra_env+=(NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH=1)
   fi
 fi
 

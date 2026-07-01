@@ -120,6 +120,9 @@ struct ngx_http_ffi_client_op_s {
     unsigned                             keepalive:1;
     unsigned                             keepalive_counted:1;
     unsigned                             reused:1;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    unsigned                             hyper_borrow_response:1;
+#endif
 };
 
 

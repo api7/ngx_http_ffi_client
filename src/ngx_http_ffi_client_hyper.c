@@ -3,7 +3,14 @@
 
 static ngx_int_t ngx_http_ffi_client_hyper_write_err(u_char *err,
     size_t *errlen, const char *msg);
+static ngx_int_t ngx_http_ffi_client_hyper_to_ffi_impl(ngx_pool_t *pool,
+    const ngx_http_ffi_client_hyper_t *engine,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen,
+    ngx_uint_t copy);
 static ngx_int_t ngx_http_ffi_client_hyper_copy_str(ngx_pool_t *pool,
+    ngx_http_ffi_client_ffi_str_t *dst,
+    ngx_http_ffi_client_ffi_str_t *src, u_char *err, size_t *errlen);
+static ngx_int_t ngx_http_ffi_client_hyper_borrow_str(
     ngx_http_ffi_client_ffi_str_t *dst,
     ngx_http_ffi_client_ffi_str_t *src, u_char *err, size_t *errlen);
 
@@ -12,6 +19,27 @@ ngx_int_t
 ngx_http_ffi_client_hyper_to_ffi(ngx_pool_t *pool,
     const ngx_http_ffi_client_hyper_t *engine,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
+{
+    return ngx_http_ffi_client_hyper_to_ffi_impl(pool, engine, resp, err,
+                                                errlen, 1);
+}
+
+
+ngx_int_t
+ngx_http_ffi_client_hyper_to_ffi_borrowed(ngx_pool_t *pool,
+    const ngx_http_ffi_client_hyper_t *engine,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
+{
+    return ngx_http_ffi_client_hyper_to_ffi_impl(pool, engine, resp, err,
+                                                errlen, 0);
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_hyper_to_ffi_impl(ngx_pool_t *pool,
+    const ngx_http_ffi_client_hyper_t *engine,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen,
+    ngx_uint_t copy)
 {
     uint16_t                                status;
     size_t                                  i, n;
@@ -52,18 +80,35 @@ ngx_http_ffi_client_hyper_to_ffi(ngx_pool_t *pool,
                                                        "invalid hyper header");
         }
 
-        if (ngx_http_ffi_client_hyper_copy_str(pool, &headers[i].key,
-                                               &view.key, err, errlen)
-            != NGX_OK)
-        {
-            return NGX_ERROR;
-        }
+        if (copy) {
+            if (ngx_http_ffi_client_hyper_copy_str(pool, &headers[i].key,
+                                                   &view.key, err, errlen)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
 
-        if (ngx_http_ffi_client_hyper_copy_str(pool, &headers[i].value,
-                                               &view.value, err, errlen)
-            != NGX_OK)
-        {
-            return NGX_ERROR;
+            if (ngx_http_ffi_client_hyper_copy_str(pool, &headers[i].value,
+                                                   &view.value, err, errlen)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+        } else {
+            if (ngx_http_ffi_client_hyper_borrow_str(&headers[i].key,
+                                                     &view.key, err, errlen)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+            if (ngx_http_ffi_client_hyper_borrow_str(&headers[i].value,
+                                                     &view.value, err, errlen)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
         }
     }
 
@@ -76,11 +121,21 @@ ngx_http_ffi_client_hyper_to_ffi(ngx_pool_t *pool,
     resp->headers = headers;
     resp->headers_len = n;
 
-    if (ngx_http_ffi_client_hyper_copy_str(pool, &resp->body, &body, err,
-                                           errlen)
-        != NGX_OK)
-    {
-        return NGX_ERROR;
+    if (copy) {
+        if (ngx_http_ffi_client_hyper_copy_str(pool, &resp->body, &body, err,
+                                               errlen)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+    } else {
+        if (ngx_http_ffi_client_hyper_borrow_str(&resp->body, &body, err,
+                                                 errlen)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
     }
 
     return NGX_OK;
@@ -160,6 +215,28 @@ ngx_http_ffi_client_hyper_copy_str(ngx_pool_t *pool,
     }
 
     ngx_memcpy(dst->data, src->data, src->len);
+    dst->len = src->len;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_ffi_client_hyper_borrow_str(ngx_http_ffi_client_ffi_str_t *dst,
+    ngx_http_ffi_client_ffi_str_t *src, u_char *err, size_t *errlen)
+{
+    if (src->len == 0) {
+        dst->data = (u_char *) "";
+        dst->len = 0;
+        return NGX_OK;
+    }
+
+    if (src->data == NULL) {
+        return ngx_http_ffi_client_hyper_write_err(err, errlen,
+                                                   "invalid hyper data view");
+    }
+
+    dst->data = src->data;
     dst->len = src->len;
 
     return NGX_OK;
