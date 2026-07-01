@@ -613,6 +613,7 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
         n = c->recv(c, buf, sizeof(buf));
 
         if (n > 0) {
+            op->received = 1;
             op->errlen = sizeof(op->err);
             rc = ngx_http_ffi_client_response_parse(op->r->pool, &op->parser,
                                                     buf, n, op->err,
@@ -652,7 +653,7 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
             return NGX_ERROR;
         }
 
-        if (op->parser.raw == NULL) {
+        if (!op->received) {
             ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
             return NGX_ERROR;
         }

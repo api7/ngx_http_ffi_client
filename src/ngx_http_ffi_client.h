@@ -50,6 +50,37 @@ typedef struct {
 } ngx_http_ffi_client_ffi_resp_t;
 
 
+#if (NGX_HTTP_FFI_CLIENT_USE_LLHTTP)
+
+#include "llhttp.h"
+
+
+typedef struct {
+    u_char                          *data;
+    size_t                           len;
+    size_t                           cap;
+} ngx_http_ffi_client_dbuf_t;
+
+
+typedef struct {
+    llhttp_t                         parser;
+    llhttp_settings_t                settings;
+    ngx_pool_t                      *pool;
+    ngx_array_t                      headers;
+    ngx_http_ffi_client_dbuf_t       field;
+    ngx_http_ffi_client_dbuf_t       value;
+    ngx_http_ffi_client_dbuf_t       body;
+    ngx_uint_t                       status;
+    u_char                          *err;
+    size_t                          *errlen;
+    unsigned                         headers_done:1;
+    unsigned                         done:1;
+    unsigned                         connection_close:1;
+    unsigned                         error:1;
+} ngx_http_ffi_client_response_parser_t;
+
+#else
+
 typedef struct {
     ngx_uint_t                       status;
     ngx_array_t                      headers;
@@ -61,6 +92,8 @@ typedef struct {
     unsigned                         done:1;
     unsigned                         connection_close:1;
 } ngx_http_ffi_client_response_parser_t;
+
+#endif
 
 
 typedef struct ngx_http_ffi_client_keepalive_pool_s
@@ -110,6 +143,7 @@ struct ngx_http_ffi_client_op_s {
     unsigned                             keepalive:1;
     unsigned                             keepalive_counted:1;
     unsigned                             reused:1;
+    unsigned                             received:1;
 };
 
 
