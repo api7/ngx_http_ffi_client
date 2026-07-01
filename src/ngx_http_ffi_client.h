@@ -68,6 +68,13 @@ typedef struct ngx_http_ffi_client_keepalive_pool_s
 typedef struct ngx_http_ffi_client_keepalive_item_s
     ngx_http_ffi_client_keepalive_item_t;
 
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+#ifndef NGX_HTTP_FFI_CLIENT_HYPER_T_DEFINED
+#define NGX_HTTP_FFI_CLIENT_HYPER_T_DEFINED
+typedef struct ngx_http_ffi_client_hyper_s ngx_http_ffi_client_hyper_t;
+#endif
+#endif
+
 
 typedef struct {
     ngx_rbtree_t                      pools;
@@ -96,6 +103,9 @@ struct ngx_http_ffi_client_op_s {
     ngx_http_ffi_client_state_e          state;
     ngx_buf_t                           *request;
     ngx_http_ffi_client_response_parser_t parser;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    ngx_http_ffi_client_hyper_t          *hyper;
+#endif
     ngx_msec_t                           connect_timeout;
     ngx_msec_t                           send_timeout;
     ngx_msec_t                           read_timeout;
