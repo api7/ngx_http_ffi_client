@@ -42,7 +42,7 @@ if [ ! -d "pcre2-$pcre2_version" ]; then
 fi
 
 cd "$workdir/$openresty_src"
-ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)"
+ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' -print -quit)"
 test -n "$ngx_lua_dir"
 
 extra_env=()

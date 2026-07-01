@@ -8,7 +8,9 @@ duration="${BENCH_DURATION:-30s}"
 connections="${BENCH_CONNECTIONS:-64}"
 threads="${BENCH_THREADS:-2}"
 port="${BENCH_PORT:-19840}"
-workdir="${BENCH_WORKDIR:-/tmp/ngx_http_ffi_client_bench-$backend}"
+workdir="${BENCH_WORKDIR:-}"
+created_workdir=0
+nginx_started=0
 
 case "$backend" in
   c|hyper) ;;
@@ -23,27 +25,45 @@ if [ ! -x "$nginx_bin" ]; then
   exit 2
 fi
 
-case "$workdir" in
-  /tmp/ngx_http_ffi_client_bench-*) ;;
-  *)
-    echo "BENCH_WORKDIR must start with /tmp/ngx_http_ffi_client_bench-" >&2
+case "$port" in
+  ''|*[!0-9]*)
+    echo "BENCH_PORT must be a positive integer in 1..65535" >&2
     exit 2
     ;;
 esac
 
-if ! command -v wrk >/dev/null 2>&1; then
-  echo "wrk is required for benchmarks" >&2
+require_positive_integer() {
+  value_name="$1"
+  value="$2"
+
+  case "$value" in
+    ''|*[!0-9]*)
+      echo "$value_name must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+
+  if [ "$value" -lt 1 ]; then
+    echo "$value_name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  echo "BENCH_PORT must be a positive integer in 1..65535" >&2
   exit 2
 fi
 
-cleanup() {
-  "$nginx_bin" -p "$workdir" -s stop >/dev/null 2>&1 || true
-}
+require_positive_integer BENCH_THREADS "$threads"
+require_positive_integer BENCH_CONNECTIONS "$connections"
 
-stop_existing() {
-  if [ -s "$workdir/logs/nginx.pid" ]; then
+cleanup() {
+  if [ "$nginx_started" -eq 1 ]; then
     "$nginx_bin" -p "$workdir" -s stop >/dev/null 2>&1 || true
-    sleep 0.2
+  fi
+
+  if [ "$created_workdir" -eq 1 ]; then
+    rm -rf "$workdir"
   fi
 }
 
@@ -54,8 +74,30 @@ tail_error_log() {
 }
 
 trap cleanup EXIT
-stop_existing
-rm -rf "$workdir"
+
+if [ -n "$workdir" ]; then
+  case "$workdir" in
+    /tmp/ngx_http_ffi_client_bench-*) ;;
+    *)
+      echo "BENCH_WORKDIR must start with /tmp/ngx_http_ffi_client_bench-" >&2
+      exit 2
+      ;;
+  esac
+
+  if [ -s "$workdir/logs/nginx.pid" ]; then
+    echo "BENCH_WORKDIR already contains logs/nginx.pid; clean it up or choose another directory" >&2
+    exit 2
+  fi
+else
+  workdir="$(mktemp -d "/tmp/ngx_http_ffi_client_bench-${backend}.XXXXXX")"
+  created_workdir=1
+fi
+
+if ! command -v wrk >/dev/null 2>&1; then
+  echo "wrk is required for benchmarks" >&2
+  exit 2
+fi
+
 mkdir -p "$workdir/logs" "$workdir/conf"
 
 cat > "$workdir/conf/nginx.conf" <<NGINX
@@ -109,6 +151,7 @@ http {
 NGINX
 
 "$nginx_bin" -p "$workdir" -c conf/nginx.conf
+nginx_started=1
 sleep 0.2
 
 health_body="$(curl -fsS "http://127.0.0.1:$port/bench"; printf x)"
