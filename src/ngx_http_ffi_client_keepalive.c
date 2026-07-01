@@ -1,4 +1,7 @@
 #include "ngx_http_ffi_client.h"
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+#include "ngx_http_ffi_client_hyper.h"
+#endif
 
 
 struct ngx_http_ffi_client_keepalive_item_s {
@@ -7,6 +10,9 @@ struct ngx_http_ffi_client_keepalive_item_s {
     ngx_connection_t                   *connection;
     struct sockaddr_storage             sockaddr;
     socklen_t                           socklen;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+    ngx_http_ffi_client_hyper_t        *hyper;
+#endif
 };
 
 
@@ -74,6 +80,9 @@ ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
 
         if (c == NULL
             || ngx_http_ffi_client_keepalive_bad_connection(c)
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+            || item->hyper == NULL
+#endif
             || !ngx_http_ffi_client_keepalive_match(item, &op->peer))
         {
             ngx_queue_remove(q);
@@ -102,6 +111,10 @@ ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
         c->write->log = c->log;
 
         op->peer.connection = c;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+        op->hyper = item->hyper;
+        item->hyper = NULL;
+#endif
         op->peer.cached = 1;
         op->peer.sockaddr = (struct sockaddr *) &item->sockaddr;
         op->peer.socklen = item->socklen;
@@ -158,6 +171,10 @@ ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op)
     }
 
     item->connection = c;
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+    item->hyper = op->hyper;
+    op->hyper = NULL;
+#endif
     item->socklen = op->peer.socklen;
     ngx_memcpy(&item->sockaddr, op->peer.sockaddr, op->peer.socklen);
 
@@ -429,6 +446,13 @@ static void
 ngx_http_ffi_client_keepalive_close_item(
     ngx_http_ffi_client_keepalive_item_t *item)
 {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+    if (item->hyper != NULL) {
+        ngx_http_ffi_client_hyper_free(item->hyper);
+        item->hyper = NULL;
+    }
+#endif
+
     if (item->connection == NULL) {
         return;
     }

@@ -118,11 +118,13 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     }
 
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+#if !(NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
     op->hyper = ngx_http_ffi_client_hyper_new(req);
     if (op->hyper == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen,
                                            "failed to create hyper engine");
     }
+#endif
 #if (NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH)
     cln = ngx_pool_cleanup_add(r->pool, 0);
     if (cln == NULL) {
@@ -167,6 +169,15 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     if (op->keepalive) {
         rc = ngx_http_ffi_client_keepalive_get(r, op, req, err, errlen);
         if (rc == NGX_OK) {
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+            if (ngx_http_ffi_client_hyper_start_request(op->hyper, req) != 0)
+            {
+                ngx_http_ffi_client_close(op);
+                return ngx_http_ffi_client_set_err(err, errlen,
+                    "failed to reuse hyper session");
+            }
+#endif
+
             if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
                 ngx_http_ffi_client_close(op);
                 return ngx_http_ffi_client_set_err(err, errlen, "no memory");
@@ -188,6 +199,14 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
             return NGX_ERROR;
         }
     }
+
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER && NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+    op->hyper = ngx_http_ffi_client_hyper_new(req);
+    if (op->hyper == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "failed to create hyper engine");
+    }
+#endif
 
     op->peer.get = ngx_http_ffi_client_get_peer;
     op->peer.log = r->connection->log;
@@ -1116,7 +1135,24 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     saved = 0;
 
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
-#if (NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH)
+#if (NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH)
+    /*
+     * Benchmark-only session reuse path: cache the Rust hyper sender/
+     * connection state together with the Nginx fd. This removes per-request
+     * hyper engine construction from reused keepalive requests while keeping
+     * the same fd safety checks in the Nginx keepalive pool.
+     *
+     * TODO: turn this into an explicit production ownership contract before
+     * exposing it outside benchmark builds.
+     */
+    if (rc == NGX_OK
+        && op->keepalive
+        && ngx_http_ffi_client_hyper_session_reusable(op->hyper)
+        && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
+    {
+        saved = 1;
+    }
+#elif (NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH)
     /*
      * Benchmark-only keepalive path inspired by lua-nginx-module cosocket
      * setkeepalive: Rust first proves the hyper read buffer and wrapper IO

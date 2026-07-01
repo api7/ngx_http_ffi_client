@@ -222,6 +222,38 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_keepalive_reusable(
     .unwrap_or(false)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_session_reusable(
+    engine: *const Engine,
+) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = engine.as_ref() else {
+            return false;
+        };
+
+        engine.mark_session_reusable_for_bench()
+    }))
+    .unwrap_or(false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_start_request(
+    engine: *mut Engine,
+    req: *const FfiReq,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = engine.as_mut() else {
+            return -1;
+        };
+
+        match engine.start_request(req) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    }))
+    .unwrap_or(-1)
+}
+
 // Returns a borrowed error message view. The pointer is valid only until the
 // next mutating FFI call or free.
 #[no_mangle]
@@ -390,6 +422,7 @@ mod tests {
     }
 
     unsafe fn finish_text_response(engine: *mut Engine) {
+        let _ = poll_engine(engine);
         assert_eq!(
             ngx_http_ffi_client_hyper_consume_output(engine, output_bytes(engine).len()),
             0
@@ -572,6 +605,37 @@ mod tests {
             assert_eq!(
                 slice::from_raw_parts(header.value.data, header.value.len),
                 b"4"
+            );
+
+            ngx_http_ffi_client_hyper_free(engine);
+        }
+    }
+
+    #[test]
+    fn ffi_session_reuses_connection_for_second_request() {
+        unsafe {
+            let mut first = TestReq::new("GET", "/one", b"", &[]);
+            first.req.keepalive = 1;
+            let engine = new_engine(&first);
+
+            finish_text_response(engine);
+            assert_eq!(poll_engine(engine).done, 1);
+            assert!(ngx_http_ffi_client_hyper_session_reusable(engine));
+
+            let mut second = TestReq::new("GET", "/two", b"", &[]);
+            second.req.keepalive = 1;
+            assert_eq!(
+                ngx_http_ffi_client_hyper_start_request(engine, &second.req),
+                0
+            );
+
+            let poll = poll_engine(engine);
+            assert_eq!(poll.error, 0);
+            let written = output_bytes(engine);
+            assert!(
+                written.starts_with(b"GET /two HTTP/1.1\r\n"),
+                "{}",
+                String::from_utf8_lossy(&written)
             );
 
             ngx_http_ffi_client_hyper_free(engine);

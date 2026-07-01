@@ -9,6 +9,7 @@ pcre2_version="${PCRE2_VERSION:-10.45}"
 workdir="${NGX_HTTP_FFI_CLIENT_BUILD_DIR:-/tmp/ngx_http_ffi_client_build}"
 hyper_keepalive_bench="${NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH:-0}"
 hyper_borrow_response_bench="${NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH:-0}"
+hyper_session_bench="${NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH:-0}"
 
 case "$backend" in
   c|hyper) ;;
@@ -34,8 +35,26 @@ case "$hyper_borrow_response_bench" in
     ;;
 esac
 
+case "$hyper_session_bench" in
+  0|1) ;;
+  *)
+    echo "NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
 if [ "$backend" != "hyper" ] && [ "$hyper_borrow_response_bench" = "1" ]; then
   echo "NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH requires hyper backend" >&2
+  exit 2
+fi
+
+if [ "$backend" != "hyper" ] && [ "$hyper_session_bench" = "1" ]; then
+  echo "NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH requires hyper backend" >&2
+  exit 2
+fi
+
+if [ "$hyper_borrow_response_bench" = "1" ] && [ "$hyper_session_bench" = "1" ]; then
+  echo "NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH and NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH cannot be combined" >&2
   exit 2
 fi
 
@@ -43,8 +62,14 @@ if [ "$hyper_borrow_response_bench" = "1" ]; then
   hyper_keepalive_bench=1
 fi
 
+if [ "$hyper_session_bench" = "1" ]; then
+  hyper_keepalive_bench=1
+fi
+
 build_name="$backend"
-if [ "$backend" = "hyper" ] && [ "$hyper_borrow_response_bench" = "1" ]; then
+if [ "$backend" = "hyper" ] && [ "$hyper_session_bench" = "1" ]; then
+  build_name="hyper-session-bench"
+elif [ "$backend" = "hyper" ] && [ "$hyper_borrow_response_bench" = "1" ]; then
   build_name="hyper-borrow-response-bench"
 elif [ "$backend" = "hyper" ] && [ "$hyper_keepalive_bench" = "1" ]; then
   build_name="hyper-keepalive-bench"
@@ -88,6 +113,9 @@ if [ "$backend" = "hyper" ]; then
   fi
   if [ "$hyper_borrow_response_bench" = "1" ]; then
     extra_env+=(NGX_HTTP_FFI_CLIENT_HYPER_BORROW_RESPONSE_BENCH=1)
+  fi
+  if [ "$hyper_session_bench" = "1" ]; then
+    extra_env+=(NGX_HTTP_FFI_CLIENT_HYPER_SESSION_BENCH=1)
   fi
 fi
 

@@ -30,6 +30,7 @@ pub struct Response {
 /// thread, with no concurrent FFI calls for the same engine pointer.
 pub struct Engine {
     io: BufferedIo,
+    sender: Option<http1::SendRequest<ReqBody>>,
     connection: Option<http1::Connection<BufferedIo, ReqBody>>,
     response_future: Option<ResponseFuture>,
     response_body: Option<Incoming>,
@@ -61,6 +62,7 @@ impl Engine {
 
         Ok(Self {
             io,
+            sender: Some(sender),
             connection: Some(connection),
             response_future: Some(response_future),
             response_body: None,
@@ -144,6 +146,73 @@ impl Engine {
         };
 
         read_buf_empty && self.io.input_len() == 0 && self.io.output_len() == 0
+    }
+
+    pub fn mark_session_reusable_for_bench(&self) -> bool {
+        if !self.done()
+            || self.output_len() != 0
+            || self.io.input_len() != 0
+            || self.response_future.is_some()
+            || self.response_body.is_some()
+        {
+            return false;
+        }
+
+        let Some(response) = self.response.as_ref() else {
+            return false;
+        };
+
+        if response.connection_close {
+            return false;
+        }
+
+        let Some(sender) = self.sender.as_ref() else {
+            return false;
+        };
+
+        !sender.is_closed() && self.connection.is_some()
+    }
+
+    pub unsafe fn start_request(&mut self, req: *const FfiReq) -> Result<(), String> {
+        if req.is_null() {
+            return Err("null request".to_string());
+        }
+
+        if !self.mark_session_reusable_for_bench() {
+            return Err("hyper session is not reusable".to_string());
+        }
+
+        let request = build_request(&*req)?;
+
+        let ready = with_context(|cx| match self.poll_sender_ready(cx) {
+            Poll::Ready(Ok(())) => Ok(true),
+            Poll::Ready(Err(err)) => Err(err),
+            Poll::Pending => {
+                self.poll_connection(cx);
+                match self.poll_sender_ready(cx) {
+                    Poll::Ready(Ok(())) => Ok(true),
+                    Poll::Ready(Err(err)) => Err(err),
+                    Poll::Pending => Ok(false),
+                }
+            }
+        })?;
+
+        if !ready {
+            return Err("hyper sender is not ready".to_string());
+        }
+
+        let Some(sender) = self.sender.as_mut() else {
+            return Err("hyper sender is missing".to_string());
+        };
+
+        self.response_future = Some(Box::pin(sender.send_request(request)));
+        self.response_body = None;
+        self.response = None;
+        self.detached_read_buf_empty = None;
+        self.complete = false;
+        self.error = None;
+
+        Ok(())
     }
 
     pub fn error_bytes(&self) -> &[u8] {
@@ -253,6 +322,7 @@ impl Engine {
                 let parts = connection.into_parts();
                 self.detached_read_buf_empty = Some(parts.read_buf.is_empty());
                 self.io = parts.io;
+                self.sender = None;
 
                 if self.response_future.is_none()
                     && self.response_body.is_none()
@@ -266,9 +336,22 @@ impl Engine {
                     self.fail(err.to_string());
                 } else {
                     self.connection = None;
+                    self.sender = None;
                 }
             }
             Poll::Pending => {}
+        }
+    }
+
+    fn poll_sender_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), String>> {
+        let Some(sender) = self.sender.as_mut() else {
+            return Poll::Ready(Err("hyper sender is missing".to_string()));
+        };
+
+        match sender.poll_ready(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err.to_string())),
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -286,6 +369,7 @@ impl Engine {
         self.response_future = None;
         self.response_body = None;
         self.connection = None;
+        self.sender = None;
         self.detached_read_buf_empty = Some(false);
         self.complete = false;
     }
@@ -734,5 +818,42 @@ mod tests {
         );
 
         assert!(!engine.mark_keepalive_reusable_for_bench());
+    }
+
+    #[test]
+    fn benchmark_session_reuses_connection_for_second_request() {
+        let mut first = TestReq::new("GET", "/one", b"", &[]);
+        first.req.keepalive = 1;
+        let mut engine = unsafe { Engine::new(&first.req) }.expect("engine");
+
+        finish_response(
+            &mut engine,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none",
+        );
+
+        assert!(engine.done());
+        assert!(engine.mark_session_reusable_for_bench());
+
+        let mut second = TestReq::new("GET", "/two", b"", &[]);
+        second.req.keepalive = 1;
+        unsafe { engine.start_request(&second.req) }.expect("second request");
+
+        let poll = engine.poll();
+        assert_eq!(poll.error, 0);
+        let written = output(&engine);
+        assert!(
+            written.starts_with(b"GET /two HTTP/1.1\r\n"),
+            "{}",
+            String::from_utf8_lossy(written)
+        );
+
+        finish_response(
+            &mut engine,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo",
+        );
+
+        assert!(engine.done());
+        assert_eq!(engine.response().expect("response").body, b"two");
+        assert!(engine.mark_session_reusable_for_bench());
     }
 }
