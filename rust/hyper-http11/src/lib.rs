@@ -208,6 +208,20 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_connection_close(engine: *con
     .unwrap_or(false)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_keepalive_reusable(
+    engine: *mut Engine,
+) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = engine.as_mut() else {
+            return false;
+        };
+
+        engine.mark_keepalive_reusable_for_bench()
+    }))
+    .unwrap_or(false)
+}
+
 // Returns a borrowed error message view. The pointer is valid only until the
 // next mutating FFI call or free.
 #[no_mangle]

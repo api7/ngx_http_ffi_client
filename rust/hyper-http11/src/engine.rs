@@ -34,6 +34,7 @@ pub struct Engine {
     response_future: Option<ResponseFuture>,
     response_body: Option<Incoming>,
     response: Option<Response>,
+    detached_read_buf_empty: Option<bool>,
     complete: bool,
     error: Option<String>,
 }
@@ -64,6 +65,7 @@ impl Engine {
             response_future: Some(response_future),
             response_body: None,
             response: None,
+            detached_read_buf_empty: None,
             complete: false,
             error: None,
         })
@@ -116,6 +118,32 @@ impl Engine {
 
     pub fn response(&self) -> Option<&Response> {
         self.response.as_ref()
+    }
+
+    pub fn mark_keepalive_reusable_for_bench(&mut self) -> bool {
+        if !self.done() || self.output_len() != 0 || self.io.input_len() != 0 {
+            return false;
+        }
+
+        let Some(response) = self.response.as_ref() else {
+            return false;
+        };
+
+        if response.connection_close {
+            return false;
+        }
+
+        let read_buf_empty = if let Some(connection) = self.connection.take() {
+            let parts = connection.into_parts();
+            let read_buf_empty = parts.read_buf.is_empty();
+            self.io = parts.io;
+            self.detached_read_buf_empty = Some(read_buf_empty);
+            read_buf_empty
+        } else {
+            self.detached_read_buf_empty.unwrap_or(false)
+        };
+
+        read_buf_empty && self.io.input_len() == 0 && self.io.output_len() == 0
     }
 
     pub fn error_bytes(&self) -> &[u8] {
@@ -221,7 +249,11 @@ impl Engine {
 
         match Pin::new(connection).poll(cx) {
             Poll::Ready(Ok(())) => {
-                self.connection = None;
+                let connection = self.connection.take().expect("connection");
+                let parts = connection.into_parts();
+                self.detached_read_buf_empty = Some(parts.read_buf.is_empty());
+                self.io = parts.io;
+
                 if self.response_future.is_none()
                     && self.response_body.is_none()
                     && self.response.is_some()
@@ -254,6 +286,7 @@ impl Engine {
         self.response_future = None;
         self.response_body = None;
         self.connection = None;
+        self.detached_read_buf_empty = Some(false);
         self.complete = false;
     }
 }
@@ -493,6 +526,18 @@ mod tests {
         unsafe { slice::from_raw_parts(engine.output_ptr(), engine.output_len()) }
     }
 
+    fn finish_response(engine: &mut Engine, response: &[u8]) {
+        let _ = engine.poll();
+        engine.consume_output(engine.output_len());
+        engine.feed(response);
+
+        for _ in 0..8 {
+            if engine.poll().done != 0 {
+                return;
+            }
+        }
+    }
+
     #[test]
     fn emits_post_request_bytes_with_headers_and_body() {
         let req = TestReq::new("POST", "/submit", b"payload", &[("X-Test", "yes")]);
@@ -663,5 +708,31 @@ mod tests {
                 String::from_utf8_lossy(raw)
             );
         }
+    }
+
+    #[test]
+    fn benchmark_keepalive_reusable_after_clean_response() {
+        let mut req = TestReq::new("GET", "/clean", b"", &[]);
+        req.req.keepalive = 1;
+        let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+        finish_response(&mut engine, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+
+        assert!(engine.done());
+        assert!(engine.mark_keepalive_reusable_for_bench());
+    }
+
+    #[test]
+    fn benchmark_keepalive_rejects_protocol_residue() {
+        let mut req = TestReq::new("GET", "/dirty", b"", &[]);
+        req.req.keepalive = 1;
+        let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+        finish_response(
+            &mut engine,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP/1.1",
+        );
+
+        assert!(!engine.mark_keepalive_reusable_for_bench());
     }
 }

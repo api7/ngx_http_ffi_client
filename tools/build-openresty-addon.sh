@@ -7,8 +7,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 openresty_version="${OPENRESTY_VERSION:-1.31.1.1}"
 pcre2_version="${PCRE2_VERSION:-10.45}"
 workdir="${NGX_HTTP_FFI_CLIENT_BUILD_DIR:-/tmp/ngx_http_ffi_client_build}"
-prefix="${OPENRESTY_PREFIX:-$workdir/openresty-$backend}"
-openresty_src="openresty-$openresty_version-$backend"
+hyper_keepalive_bench="${NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH:-0}"
 
 case "$backend" in
   c|hyper) ;;
@@ -17,6 +16,22 @@ case "$backend" in
     exit 2
     ;;
 esac
+
+case "$hyper_keepalive_bench" in
+  0|1) ;;
+  *)
+    echo "NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+build_name="$backend"
+if [ "$backend" = "hyper" ] && [ "$hyper_keepalive_bench" = "1" ]; then
+  build_name="hyper-keepalive-bench"
+fi
+
+prefix="${OPENRESTY_PREFIX:-$workdir/openresty-$build_name}"
+openresty_src="openresty-$openresty_version-$build_name"
 
 if [ "$backend" = "hyper" ] && ! grep -q 'NGX_HTTP_FFI_CLIENT_USE_HYPER' "$root/config"; then
   echo "hyper backend is not supported by config yet; NGX_HTTP_FFI_CLIENT_USE_HYPER is not consumed" >&2
@@ -48,6 +63,9 @@ test -n "$ngx_lua_dir"
 extra_env=()
 if [ "$backend" = "hyper" ]; then
   extra_env+=(NGX_HTTP_FFI_CLIENT_USE_HYPER=1)
+  if [ "$hyper_keepalive_bench" = "1" ]; then
+    extra_env+=(NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH=1)
+  fi
 fi
 
 env "${extra_env[@]}" NGX_HTTP_LUA_MODULE_DIR="$ngx_lua_dir" ./configure \

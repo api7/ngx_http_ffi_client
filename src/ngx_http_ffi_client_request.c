@@ -1052,10 +1052,29 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     saved = 0;
 
 #if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+#if (NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH)
+    /*
+     * Benchmark-only keepalive path inspired by lua-nginx-module cosocket
+     * setkeepalive: Rust first proves the hyper read buffer and wrapper IO
+     * buffers are empty, then the existing Nginx keepalive pool checks the fd
+     * state before caching it.
+     *
+     * TODO: replace this gate with a production contract that preserves or
+     * safely detaches all hyper per-connection state across pooled requests.
+     */
+    if (rc == NGX_OK
+        && op->keepalive
+        && ngx_http_ffi_client_hyper_keepalive_reusable(op->hyper)
+        && ngx_http_ffi_client_keepalive_save(op) == NGX_OK)
+    {
+        saved = 1;
+    }
+#else
     /*
      * Until the hyper engine can prove no unread or internal buffered bytes
      * remain, hyper connections are closed after each response.
      */
+#endif
 #else
     if (rc == NGX_OK
         && op->keepalive

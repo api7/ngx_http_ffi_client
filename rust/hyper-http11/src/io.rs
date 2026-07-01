@@ -51,6 +51,10 @@ impl BufferedIo {
         self.inner.borrow().output.len()
     }
 
+    pub fn input_len(&self) -> usize {
+        self.inner.borrow().input.len()
+    }
+
     pub fn output_ptr(&self) -> *const u8 {
         let inner = self.inner.borrow();
         if inner.output.is_empty() {

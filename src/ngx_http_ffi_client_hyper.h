@@ -66,6 +66,8 @@ int ngx_http_ffi_client_hyper_body(const ngx_http_ffi_client_hyper_t *engine,
     ngx_http_ffi_client_ffi_str_t *out);
 bool ngx_http_ffi_client_hyper_connection_close(
     const ngx_http_ffi_client_hyper_t *engine);
+bool ngx_http_ffi_client_hyper_keepalive_reusable(
+    ngx_http_ffi_client_hyper_t *engine);
 int ngx_http_ffi_client_hyper_error(const ngx_http_ffi_client_hyper_t *engine,
     ngx_http_ffi_client_hyper_error_view_t *out);
 

@@ -8,6 +8,7 @@ duration="${BENCH_DURATION:-30s}"
 connections="${BENCH_CONNECTIONS:-64}"
 threads="${BENCH_THREADS:-2}"
 port="${BENCH_PORT:-19840}"
+require_keepalive_reuse="${BENCH_REQUIRE_KEEPALIVE_REUSE:-1}"
 workdir="${BENCH_WORKDIR:-}"
 created_workdir=0
 nginx_started=0
@@ -53,6 +54,14 @@ if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
   echo "BENCH_PORT must be a positive integer in 1..65535" >&2
   exit 2
 fi
+
+case "$require_keepalive_reuse" in
+  0|1) ;;
+  *)
+    echo "BENCH_REQUIRE_KEEPALIVE_REUSE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 require_positive_integer BENCH_THREADS "$threads"
 require_positive_integer BENCH_CONNECTIONS "$connections"
@@ -167,6 +176,42 @@ http {
             }
         }
 
+        location /reuse-check {
+            content_by_lua_block {
+                local client = require "resty.ngx_http_ffi_client"
+                local opts = {
+                    scheme = "http",
+                    host = "127.0.0.1",
+                    port = $port,
+                    method = "GET",
+                    path = "/mock",
+                    keepalive = {
+                        pool = "bench-reuse-check",
+                        idle_timeout = 60000,
+                        pool_size = 2,
+                    },
+                }
+
+                local first, err = client.request(opts)
+                if not first then
+                    ngx.status = 500
+                    ngx.say(err)
+                    return
+                end
+
+                local second
+                second, err = client.request(opts)
+                if not second then
+                    ngx.status = 500
+                    ngx.say(err)
+                    return
+                end
+
+                ngx.say("first:" .. tostring(first.reused))
+                ngx.say("second:" .. tostring(second.reused))
+            }
+        }
+
         location /backend {
             content_by_lua_block {
                 local client = require "resty.ngx_http_ffi_client"
@@ -203,6 +248,17 @@ if [ "$backend_body" != "${backend}x" ]; then
   printf '%s' "${backend_body%x}" >&2
   tail_error_log
   exit 1
+fi
+
+if [ "$require_keepalive_reuse" = "1" ]; then
+  reuse_body="$(curl -fsS "http://127.0.0.1:$port/reuse-check"; printf x)"
+  if [ "$reuse_body" != $'first:false\nsecond:true\nx' ]; then
+    echo "benchmark keepalive reuse check failed: expected second request to reuse connection" >&2
+    echo "actual reuse check:" >&2
+    printf '%s' "${reuse_body%x}" >&2
+    tail_error_log
+    exit 1
+  fi
 fi
 
 wrk -t"$threads" -c"$connections" -d"$duration" "http://127.0.0.1:$port/bench" | tee "$workdir/result.txt"

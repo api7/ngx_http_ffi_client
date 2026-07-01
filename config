@@ -2,6 +2,7 @@ ngx_addon_name=ngx_http_ffi_client_module
 
 ngx_http_ffi_client_lua_module_dir="${NGX_HTTP_LUA_MODULE_DIR:-}"
 ngx_http_ffi_client_use_hyper="${NGX_HTTP_FFI_CLIENT_USE_HYPER:-0}"
+ngx_http_ffi_client_hyper_keepalive_bench="${NGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH:-0}"
 
 if [ -z "$ngx_http_ffi_client_lua_module_dir" ]; then
     if [ -f "$ngx_addon_dir/../lua-nginx-module/src/api/ngx_http_lua_api.h" ]; then
@@ -36,6 +37,10 @@ END
     fi
 
     CFLAGS="$CFLAGS -DNGX_HTTP_FFI_CLIENT_USE_HYPER=1"
+    if [ "$ngx_http_ffi_client_hyper_keepalive_bench" = "1" ]; then
+        CFLAGS="$CFLAGS -DNGX_HTTP_FFI_CLIENT_HYPER_KEEPALIVE_BENCH=1"
+    fi
+
     CORE_LIBS="$CORE_LIBS $ngx_http_ffi_client_hyper_lib"
 fi
 
