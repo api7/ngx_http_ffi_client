@@ -66,6 +66,7 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         ngx_http_ffi_client_ffi_req_t *req,
         ngx_http_ffi_client_ffi_resp_t *resp,
         unsigned char *err, size_t *errlen);
+    const char *ngx_http_ffi_client_ffi_backend(void);
     ]]
 end
 
@@ -75,6 +76,7 @@ local resp_t = ffi.typeof("ngx_http_ffi_client_ffi_resp_t")
 local header_array_t = ffi.typeof("ngx_http_ffi_client_ffi_header_t[?]")
 local ERR_BUF_SIZE = 256
 local ffi_request
+local ffi_backend
 
 
 local _M = {
@@ -165,6 +167,23 @@ local function response_table(resp)
         body = body,
         reused = resp.reused ~= 0,
     }
+end
+
+
+function _M.backend()
+    if not ffi_backend then
+        local ok
+        ok, ffi_backend = pcall(function()
+            return C.ngx_http_ffi_client_ffi_backend
+        end)
+
+        if not ok then
+            ffi_backend = nil
+            return nil, "ngx_http_ffi_client_module is not loaded"
+        end
+    end
+
+    return ffi_str(ffi_backend())
 end
 
 

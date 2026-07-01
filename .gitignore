@@ -1,5 +1,6 @@
 docs/superpowers/
 t/servroot/
+rust/hyper-http11/target/
 
 objs/
 build/

@@ -38,6 +38,17 @@ ngx_module_t ngx_http_ffi_client_module = {
 };
 
 
+const char *
+ngx_http_ffi_client_ffi_backend(void)
+{
+#if (NGX_HTTP_FFI_CLIENT_USE_HYPER)
+    return "hyper";
+#else
+    return "c";
+#endif
+}
+
+
 static ngx_int_t
 ngx_http_ffi_client_init(ngx_conf_t *cf)
 {

@@ -73,6 +73,26 @@ tail_error_log() {
   fi
 }
 
+validate_wrk_result() {
+  if ! grep -Eq '^Requests/sec:[[:space:]]*[0-9]' "$workdir/result.txt"; then
+    echo "wrk output did not contain Requests/sec" >&2
+    tail_error_log
+    exit 1
+  fi
+
+  if grep -Eq 'Non-2xx or 3xx responses:[[:space:]]*[1-9][0-9]*' "$workdir/result.txt"; then
+    echo "wrk reported non-2xx/3xx responses" >&2
+    tail_error_log
+    exit 1
+  fi
+
+  if grep -Eq 'Socket errors:.*[1-9][0-9]*' "$workdir/result.txt"; then
+    echo "wrk reported socket errors" >&2
+    tail_error_log
+    exit 1
+  fi
+}
+
 trap cleanup EXIT
 
 if [ -n "$workdir" ]; then
@@ -146,6 +166,19 @@ http {
                 ngx.print(res.body)
             }
         }
+
+        location /backend {
+            content_by_lua_block {
+                local client = require "resty.ngx_http_ffi_client"
+                local current, err = client.backend()
+                if not current then
+                    ngx.status = 500
+                    ngx.say(err)
+                    return
+                end
+                ngx.print(current)
+            }
+        }
     }
 }
 NGINX
@@ -163,4 +196,14 @@ if [ "$health_body" != $'hello\nx' ]; then
   exit 1
 fi
 
+backend_body="$(curl -fsS "http://127.0.0.1:$port/backend"; printf x)"
+if [ "$backend_body" != "${backend}x" ]; then
+  echo "benchmark backend check failed: expected backend '$backend'" >&2
+  echo "actual backend:" >&2
+  printf '%s' "${backend_body%x}" >&2
+  tail_error_log
+  exit 1
+fi
+
 wrk -t"$threads" -c"$connections" -d"$duration" "http://127.0.0.1:$port/bench" | tee "$workdir/result.txt"
+validate_wrk_result

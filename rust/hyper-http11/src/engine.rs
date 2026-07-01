@@ -321,10 +321,16 @@ fn ffi_headers(req: &FfiReq) -> Result<&[FfiHeader], String> {
 }
 
 fn host_header(scheme: &str, host: &str, port: usize) -> String {
-    if port == 0 || (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
-        host.to_string()
+    let formatted_host = if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("[{host}]")
     } else {
-        format!("{host}:{port}")
+        host.to_string()
+    };
+
+    if port == 0 || (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+        formatted_host
+    } else {
+        format!("{formatted_host}:{port}")
     }
 }
 
@@ -517,6 +523,27 @@ mod tests {
         );
         assert!(
             written.ends_with(b"\r\npayload"),
+            "{}",
+            String::from_utf8_lossy(written)
+        );
+    }
+
+    #[test]
+    fn formats_ipv6_host_header_with_brackets() {
+        let mut req = TestReq::new("GET", "/ipv6", b"", &[]);
+        req.host = b"::1".to_vec();
+        req.rebuild();
+        req.req.port = 8080;
+        let mut engine = unsafe { Engine::new(&req.req) }.expect("engine");
+
+        let poll = engine.poll();
+
+        assert_eq!(poll.error, 0);
+        let written = output(&engine);
+        assert!(
+            written
+                .windows(b"Host: [::1]:8080\r\n".len())
+                .any(|window| window == b"Host: [::1]:8080\r\n"),
             "{}",
             String::from_utf8_lossy(written)
         );

@@ -16,6 +16,24 @@ run_tests();
 
 __DATA__
 
+=== TEST 0: hyper backend marker
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            ngx.say(client.backend())
+        }
+    }
+--- request
+GET /t
+--- response_body
+hyper
+--- no_error_log
+[error]
+
+
+
 === TEST 1: hyper GET content-length response
 --- http_config eval: $::HttpConfig
 --- config

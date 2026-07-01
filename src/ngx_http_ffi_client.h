@@ -129,6 +129,7 @@ extern ngx_module_t ngx_http_ffi_client_module;
 ngx_int_t ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_ffi_resp_t *resp,
     u_char *err, size_t *errlen);
+const char *ngx_http_ffi_client_ffi_backend(void);
 ngx_int_t ngx_http_ffi_client_start(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_ffi_resp_t *resp,
     u_char *err, size_t *errlen);
