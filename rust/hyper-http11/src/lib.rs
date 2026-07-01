@@ -5,7 +5,7 @@ mod waker;
 
 use crate::engine::Engine;
 use crate::ffi::{ErrorView, FfiReq, FfiStr, HeaderView, PollResult};
-use libc::size_t;
+use libc::{c_uchar, size_t};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
@@ -32,63 +32,73 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_feed(
     engine: *mut Engine,
     data: *const u8,
     len: size_t,
-) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if let Some(engine) = engine.as_mut() {
-            let data = if len == 0 {
-                &[]
-            } else if data.is_null() {
-                return;
-            } else {
-                slice::from_raw_parts(data, len as usize)
-            };
-            engine.feed(data);
-        }
-    }));
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = engine.as_mut() else {
+            return -1;
+        };
+        let data = if len == 0 {
+            &[]
+        } else if data.is_null() {
+            return -1;
+        } else {
+            slice::from_raw_parts(data, len as usize)
+        };
+        engine.feed(data);
+        0
+    }))
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ngx_http_ffi_client_hyper_poll(engine: *mut Engine) -> PollResult {
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_poll(
+    engine: *mut Engine,
+    result: *mut PollResult,
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        engine.as_mut().map(Engine::poll).unwrap_or(PollResult {
-            error: true,
-            ..PollResult::default()
-        })
+        let (Some(engine), Some(result)) = (engine.as_mut(), result.as_mut()) else {
+            return -1;
+        };
+
+        *result = engine.poll();
+        0
     }))
-    .unwrap_or(PollResult {
-        error: true,
-        ..PollResult::default()
-    })
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ngx_http_ffi_client_hyper_output(
     engine: *const Engine,
+    data: *mut *const c_uchar,
     len: *mut size_t,
-) -> *const u8 {
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        if engine.is_null() {
-            if let Some(len) = len.as_mut() {
-                *len = 0;
-            }
-            return ptr::null();
-        }
-        let engine = &*engine;
-        if let Some(len) = len.as_mut() {
-            *len = engine.output_len();
-        }
-        engine.output_ptr()
+        let (Some(engine), Some(data), Some(len)) = (engine.as_ref(), data.as_mut(), len.as_mut())
+        else {
+            return -1;
+        };
+
+        *data = engine.output_ptr().cast();
+        *len = engine.output_len();
+        0
     }))
-    .unwrap_or(ptr::null())
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ngx_http_ffi_client_hyper_consume_output(engine: *mut Engine, n: size_t) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if let Some(engine) = engine.as_mut() {
-            engine.consume_output(n as usize);
-        }
-    }));
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_consume_output(
+    engine: *mut Engine,
+    n: size_t,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(engine) = engine.as_mut() else {
+            return -1;
+        };
+
+        engine.consume_output(n as usize);
+        0
+    }))
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -119,46 +129,36 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_header_count(engine: *const E
 pub unsafe extern "C" fn ngx_http_ffi_client_hyper_header(
     engine: *const Engine,
     idx: size_t,
-) -> HeaderView {
+    out: *mut HeaderView,
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        engine
-            .as_ref()
-            .and_then(|engine| engine.header(idx as usize))
-            .unwrap_or(HeaderView {
-                key: FfiStr {
-                    data: ptr::null(),
-                    len: 0,
-                },
-                value: FfiStr {
-                    data: ptr::null(),
-                    len: 0,
-                },
-            })
+        let (Some(engine), Some(out)) = (engine.as_ref(), out.as_mut()) else {
+            return -1;
+        };
+        let Some(header) = engine.header(idx as usize) else {
+            return -1;
+        };
+
+        *out = header;
+        0
     }))
-    .unwrap_or(HeaderView {
-        key: FfiStr {
-            data: ptr::null(),
-            len: 0,
-        },
-        value: FfiStr {
-            data: ptr::null(),
-            len: 0,
-        },
-    })
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ngx_http_ffi_client_hyper_body(engine: *const Engine) -> FfiStr {
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_body(
+    engine: *const Engine,
+    out: *mut FfiStr,
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        engine.as_ref().map(Engine::body_view).unwrap_or(FfiStr {
-            data: ptr::null(),
-            len: 0,
-        })
+        let (Some(engine), Some(out)) = (engine.as_ref(), out.as_mut()) else {
+            return -1;
+        };
+
+        *out = engine.body_view();
+        0
     }))
-    .unwrap_or(FfiStr {
-        data: ptr::null(),
-        len: 0,
-    })
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -174,19 +174,68 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_connection_close(engine: *con
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ngx_http_ffi_client_hyper_error(engine: *const Engine) -> ErrorView {
+pub unsafe extern "C" fn ngx_http_ffi_client_hyper_error(
+    engine: *const Engine,
+    out: *mut ErrorView,
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let bytes = engine
-            .as_ref()
-            .map(Engine::error_bytes)
-            .unwrap_or("null engine".as_bytes());
-        ErrorView {
+        let (Some(engine), Some(out)) = (engine.as_ref(), out.as_mut()) else {
+            return -1;
+        };
+
+        let bytes = engine.error_bytes();
+        *out = ErrorView {
             data: bytes.as_ptr().cast(),
             len: bytes.len(),
-        }
+        };
+        0
     }))
-    .unwrap_or(ErrorView {
-        data: ptr::null(),
-        len: 0,
-    })
+    .unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libc::c_uchar;
+
+    #[test]
+    fn ffi_wrappers_reject_null_out_parameters() {
+        unsafe {
+            let mut data: *const c_uchar = ptr::null();
+            let mut len: size_t = 0;
+
+            assert_eq!(
+                ngx_http_ffi_client_hyper_feed(ptr::null_mut(), ptr::null(), 0),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_poll(ptr::null_mut(), ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_output(ptr::null(), &mut data, ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_output(ptr::null(), ptr::null_mut(), &mut len),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_consume_output(ptr::null_mut(), 0),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_header(ptr::null(), 0, ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_body(ptr::null(), ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                ngx_http_ffi_client_hyper_error(ptr::null(), ptr::null_mut()),
+                -1
+            );
+        }
+    }
 }

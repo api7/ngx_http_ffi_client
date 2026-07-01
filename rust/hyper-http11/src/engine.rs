@@ -240,10 +240,10 @@ impl Engine {
 
     fn poll_result(&self) -> PollResult {
         PollResult {
-            done: self.done(),
-            want_read: !self.done() && !self.failed() && self.output_len() == 0,
-            want_write: !self.failed() && self.output_len() > 0,
-            error: self.failed(),
+            done: flag(self.done()),
+            want_read: flag(!self.done() && !self.failed() && self.output_len() == 0),
+            want_write: flag(!self.failed() && self.output_len() > 0),
+            error: flag(self.failed()),
         }
     }
 
@@ -311,7 +311,11 @@ fn build_request(req: &FfiReq) -> Result<Request<ReqBody>, String> {
     }
 
     if !has_connection {
-        let value = if req.keepalive { "keep-alive" } else { "close" };
+        let value = if req.keepalive != 0 {
+            "keep-alive"
+        } else {
+            "close"
+        };
         headers.insert(CONNECTION, HeaderValue::from_static(value));
     }
 
@@ -337,12 +341,16 @@ fn ffi_headers(req: &FfiReq) -> Result<&[FfiHeader], String> {
     Ok(unsafe { std::slice::from_raw_parts(req.headers, req.headers_len as usize) })
 }
 
-fn host_header(scheme: &str, host: &str, port: u16) -> String {
+fn host_header(scheme: &str, host: &str, port: usize) -> String {
     if port == 0 || (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
         host.to_string()
     } else {
         format!("{host}:{port}")
     }
+}
+
+fn flag(value: bool) -> u32 {
+    u32::from(value)
 }
 
 fn with_context<T>(f: impl FnOnce(&mut Context<'_>) -> T) -> T {
@@ -416,7 +424,7 @@ mod tests {
                     data: std::ptr::null(),
                     len: 0,
                 },
-                keepalive: false,
+                keepalive: 0,
                 keepalive_idle_timeout: 0,
                 keepalive_pool_size: 0,
                 connect_timeout: 0,
@@ -455,7 +463,7 @@ mod tests {
                 data: std::ptr::null(),
                 len: 0,
             },
-            keepalive: false,
+            keepalive: 0,
             keepalive_idle_timeout: 0,
             keepalive_pool_size: 0,
             connect_timeout: 0,
@@ -482,7 +490,7 @@ mod tests {
 
         let poll = engine.poll();
 
-        assert!(!poll.error);
+        assert_eq!(poll.error, 0);
         let written = output(&engine);
         assert!(
             written.starts_with(b"POST /submit HTTP/1.1\r\n"),
@@ -523,7 +531,7 @@ mod tests {
         engine.close_read();
 
         for _ in 0..8 {
-            if engine.poll().done {
+            if engine.poll().done != 0 {
                 break;
             }
         }
