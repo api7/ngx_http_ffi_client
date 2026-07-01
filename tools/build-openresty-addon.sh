@@ -8,6 +8,7 @@ openresty_version="${OPENRESTY_VERSION:-1.31.1.1}"
 pcre2_version="${PCRE2_VERSION:-10.45}"
 workdir="${NGX_HTTP_FFI_CLIENT_BUILD_DIR:-/tmp/ngx_http_ffi_client_build}"
 prefix="${OPENRESTY_PREFIX:-$workdir/openresty-$backend}"
+openresty_src="openresty-$openresty_version-$backend"
 
 case "$backend" in
   c|hyper) ;;
@@ -17,12 +18,22 @@ case "$backend" in
     ;;
 esac
 
+if [ "$backend" = "hyper" ] && ! grep -q 'NGX_HTTP_FFI_CLIENT_USE_HYPER' "$root/config"; then
+  echo "hyper backend is not supported by config yet; NGX_HTTP_FFI_CLIENT_USE_HYPER is not consumed" >&2
+  exit 2
+fi
+
 mkdir -p "$workdir"
 cd "$workdir"
 
-if [ ! -d "openresty-$openresty_version" ]; then
+if [ ! -f "openresty-$openresty_version.tar.gz" ]; then
   curl -fsSLO "https://openresty.org/download/openresty-$openresty_version.tar.gz"
+fi
+
+if [ ! -d "$openresty_src" ]; then
+  rm -rf "openresty-$openresty_version"
   tar -zxf "openresty-$openresty_version.tar.gz"
+  mv "openresty-$openresty_version" "$openresty_src"
 fi
 
 if [ ! -d "pcre2-$pcre2_version" ]; then
@@ -30,7 +41,7 @@ if [ ! -d "pcre2-$pcre2_version" ]; then
   tar -zxf "pcre2-$pcre2_version.tar.gz"
 fi
 
-cd "$workdir/openresty-$openresty_version"
+cd "$workdir/$openresty_src"
 ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)"
 test -n "$ngx_lua_dir"
 
