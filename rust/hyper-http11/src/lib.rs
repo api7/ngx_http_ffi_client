@@ -48,6 +48,8 @@ pub unsafe extern "C" fn ngx_http_ffi_client_hyper_feed(
             &[]
         } else if data.is_null() {
             return -1;
+        } else if len > isize::MAX as size_t {
+            return -1;
         } else {
             slice::from_raw_parts(data, len as usize)
         };
@@ -429,6 +431,22 @@ mod tests {
                 ngx_http_ffi_client_hyper_error(ptr::null(), ptr::null_mut()),
                 -1
             );
+        }
+    }
+
+    #[test]
+    fn ffi_feed_rejects_oversized_buffer_length() {
+        unsafe {
+            let req = TestReq::new("GET", "/oversized", b"", &[]);
+            let engine = new_engine(&req);
+            let byte = 0_u8;
+
+            assert_eq!(
+                ngx_http_ffi_client_hyper_feed(engine, &byte, isize::MAX as size_t + 1,),
+                -1
+            );
+
+            ngx_http_ffi_client_hyper_free(engine);
         }
     }
 
