@@ -1,4 +1,6 @@
-use crate::ffi::{ffi_str_as_slice, FfiHeader, FfiReq, FfiStr, HeaderView, PollResult};
+use crate::ffi::{
+    ffi_headers_as_slice, ffi_str_as_slice, FfiHeader, FfiReq, FfiStr, HeaderView, PollResult,
+};
 use crate::io::BufferedIo;
 use crate::waker::noop_waker;
 use bytes::{Buf, Bytes};
@@ -22,6 +24,10 @@ pub struct Response {
     pub connection_close: bool,
 }
 
+/// Proof-of-concept HTTP/1.1 engine.
+///
+/// This engine is single-threaded. It must be used serially on one Nginx worker
+/// thread, with no concurrent FFI calls for the same engine pointer.
 pub struct Engine {
     io: BufferedIo,
     connection: Option<http1::Connection<BufferedIo, ReqBody>>,
@@ -163,7 +169,7 @@ impl Engine {
                     .headers
                     .get(CONNECTION)
                     .and_then(|value| value.to_str().ok())
-                    .map(|value| value.eq_ignore_ascii_case("close"))
+                    .map(connection_has_close)
                     .unwrap_or(false);
 
                 self.response = Some(Response {
@@ -271,53 +277,38 @@ fn build_request(req: &FfiReq) -> Result<Request<ReqBody>, String> {
         .map_err(|err| err.to_string())?;
 
     let headers = request.headers_mut();
-    let mut has_host = false;
-    let mut has_content_length = false;
-    let mut has_connection = false;
-    let mut has_transfer_encoding = false;
-
     for header in ffi_headers(req)? {
         let key = unsafe { ffi_str_as_slice(header.key) }?;
         let value = unsafe { ffi_str_as_slice(header.value) }?;
         let name = HeaderName::from_bytes(key).map_err(|err| err.to_string())?;
         let header_value = HeaderValue::from_bytes(value).map_err(|err| err.to_string())?;
 
-        if name == HOST {
-            has_host = true;
-        } else if name == CONTENT_LENGTH {
-            has_content_length = true;
-        } else if name == CONNECTION {
-            has_connection = true;
-        } else if name == TRANSFER_ENCODING {
-            has_transfer_encoding = true;
+        if is_engine_managed_request_header(&name) {
+            return Err(format!("request header is managed by engine: {name}"));
         }
 
         headers.append(name, header_value);
     }
 
-    if !has_host {
-        headers.insert(
-            HOST,
-            HeaderValue::from_str(&host_header(&scheme, &host, req.port))
-                .map_err(|err| err.to_string())?,
-        );
-    }
+    headers.insert(
+        HOST,
+        HeaderValue::from_str(&host_header(&scheme, &host, req.port))
+            .map_err(|err| err.to_string())?,
+    );
 
-    if !has_content_length && !has_transfer_encoding && !body.is_empty() {
+    if !body.is_empty() {
         headers.insert(
             CONTENT_LENGTH,
             HeaderValue::from_str(&body.len().to_string()).map_err(|err| err.to_string())?,
         );
     }
 
-    if !has_connection {
-        let value = if req.keepalive != 0 {
-            "keep-alive"
-        } else {
-            "close"
-        };
-        headers.insert(CONNECTION, HeaderValue::from_static(value));
-    }
+    let value = if req.keepalive != 0 {
+        "keep-alive"
+    } else {
+        "close"
+    };
+    headers.insert(CONNECTION, HeaderValue::from_static(value));
 
     Ok(request)
 }
@@ -330,15 +321,7 @@ fn ffi_string(value: FfiStr, name: &str) -> Result<String, String> {
 }
 
 fn ffi_headers(req: &FfiReq) -> Result<&[FfiHeader], String> {
-    if req.headers_len == 0 {
-        return Ok(&[]);
-    }
-
-    if req.headers.is_null() {
-        return Err("null headers pointer with non-zero length".to_string());
-    }
-
-    Ok(unsafe { std::slice::from_raw_parts(req.headers, req.headers_len as usize) })
+    unsafe { ffi_headers_as_slice(req.headers, req.headers_len) }
 }
 
 fn host_header(scheme: &str, host: &str, port: usize) -> String {
@@ -351,6 +334,16 @@ fn host_header(scheme: &str, host: &str, port: usize) -> String {
 
 fn flag(value: bool) -> u32 {
     u32::from(value)
+}
+
+fn is_engine_managed_request_header(name: &HeaderName) -> bool {
+    name == HOST || name == CONNECTION || name == CONTENT_LENGTH || name == TRANSFER_ENCODING
+}
+
+fn connection_has_close(value: &str) -> bool {
+    value
+        .split(',')
+        .any(|token| token.trim().eq_ignore_ascii_case("close"))
 }
 
 fn with_context<T>(f: impl FnOnce(&mut Context<'_>) -> T) -> T {
@@ -526,7 +519,7 @@ mod tests {
         let _ = engine.poll();
         engine.consume_output(engine.output_len());
         engine.feed(
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\nchunked\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive, close\r\n\r\n7\r\nchunked\r\n0\r\n\r\n",
         );
         engine.close_read();
 

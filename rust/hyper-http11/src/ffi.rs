@@ -1,4 +1,5 @@
 use libc::{c_char, size_t};
+use std::mem;
 use std::slice;
 
 #[repr(C)]
@@ -44,6 +45,12 @@ pub struct PollResult {
     pub error: u32,
 }
 
+/// Borrowed response header view.
+///
+/// The pointed-to bytes are owned by the engine. They remain valid only while
+/// the engine is alive and until the next mutating FFI call or free. C callers
+/// must copy the bytes before polling, feeding, consuming output, closing read,
+/// or freeing the engine.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct HeaderView {
@@ -51,6 +58,10 @@ pub struct HeaderView {
     pub value: FfiStr,
 }
 
+/// Borrowed engine error view.
+///
+/// The pointed-to bytes are owned by the engine. They remain valid only while
+/// the engine is alive and until the next mutating FFI call or free.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorView {
@@ -63,11 +74,34 @@ pub unsafe fn ffi_str_as_slice(value: FfiStr) -> Result<&'static [u8], String> {
         return Ok(&[]);
     }
 
+    if value.len > isize::MAX as usize {
+        return Err("FfiStr length exceeds isize::MAX".to_string());
+    }
+
     if value.data.is_null() {
         return Err("null FfiStr data with non-zero length".to_string());
     }
 
     Ok(slice::from_raw_parts(value.data, value.len as usize))
+}
+
+pub unsafe fn ffi_headers_as_slice(
+    data: *const FfiHeader,
+    len: usize,
+) -> Result<&'static [FfiHeader], String> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+
+    if data.is_null() {
+        return Err("null headers pointer with non-zero length".to_string());
+    }
+
+    if len > isize::MAX as usize / mem::size_of::<FfiHeader>() {
+        return Err("headers length exceeds isize::MAX bytes".to_string());
+    }
+
+    Ok(slice::from_raw_parts(data, len))
 }
 
 #[cfg(test)]
@@ -108,5 +142,23 @@ mod tests {
         assert_eq!(offset_of!(PollResult, want_read), 4);
         assert_eq!(offset_of!(PollResult, want_write), 8);
         assert_eq!(offset_of!(PollResult, error), 12);
+    }
+
+    #[test]
+    fn ffi_str_rejects_lengths_larger_than_isize_max() {
+        let value = FfiStr {
+            data: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+            len: isize::MAX as usize + 1,
+        };
+
+        assert!(unsafe { ffi_str_as_slice(value) }.is_err());
+    }
+
+    #[test]
+    fn ffi_headers_reject_lengths_larger_than_isize_max_bytes() {
+        let len = isize::MAX as usize / mem::size_of::<FfiHeader>() + 1;
+        let data = std::ptr::NonNull::<FfiHeader>::dangling().as_ptr();
+
+        assert!(unsafe { ffi_headers_as_slice(data, len) }.is_err());
     }
 }
