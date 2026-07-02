@@ -4,50 +4,50 @@
 
 The project goal is to let Lua code issue outbound HTTP/1.1 requests through a C implementation that integrates with Nginx/OpenResty event handling, TLS, timers, buffers, and keepalive connection management.
 
-The first implementation target is:
+The current implementation target is HTTP/1.x only:
 
 - Lua-facing request/response API for APISIX plugins.
 - Nonblocking execution inside OpenResty worker processes.
 - HTTP/1.1 over HTTP and HTTPS.
 - Keepalive connection pooling.
+- HTTP/1 parsing and framing through the vendored pure-C `llhttp` parser.
 - LuaJIT FFI bindings in `lib/resty/ngx_http_ffi_client.lua`.
 
 ## Project status
 
-This project is at an **early, exploratory stage**. The code here validates a
-direction; it is **not production-ready** yet.
+This project is at an **early implementation stage**. The protocol direction is
+settled, but the full production behavior is still being built.
 
-1. **The direction is settled.** The client will not keep maintaining a
-   hand-written HTTP protocol implementation. The parsing/protocol layers are to
-   be borrowed from battle-tested stacks, while Nginx keeps ownership of the
-   event loop, timers, and keepalive pool. Longer term this grows into a
-   high-quality outbound client for OpenResty/APISIX (TLS/SNI/mTLS, gzip,
-   chunked/trailer, HTTP/2, SSE), leveraging mainstream-language stacks in the
-   areas where C/C++ has fallen behind.
+1. **The HTTP/1 implementation strategy is settled.** The client should borrow a
+   stable, efficient, security-sensitive protocol parser instead of growing a
+   larger hand-written HTTP parser in this repository. The selected HTTP/1
+   parser is the vendored pure-C `llhttp` code under `src/llhttp/`. Nginx keeps
+   ownership of the event loop, timers, buffers, connection lifecycle, and
+   keepalive pool.
 
-2. **The current stage is technical validation (spikes).** The backends in the
-   tree are proofs of concept that de-risk the approach and are selectable at
-   build time — they are not the final shape:
-   - the initial hand-written C HTTP/1.1 parser (baseline);
-   - an `llhttp` response-parser backend (`NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1`) —
-     borrows Node.js's parser, is sans-io, and benchmarks at ~parity with the
-     hand-written C path (see [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md));
-   - a `hyper` (Rust) runtime spike exploring an async backend.
+2. **`llhttp` is the HTTP/1 parsing boundary.** The initial hand-written parser
+   remains useful as historical baseline code while the migration is completed,
+   but new HTTP/1 parsing and framing work should be designed around `llhttp`.
+   The current `llhttp` response parser is selectable with
+   `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1` and benchmarks at near parity with the
+   hand-written C path (see [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
 
-   These exist to measure and compare approaches, not to ship as-is.
+3. **The next HTTP/1 work stays in this stack.** Streaming and incremental
+   response delivery, SSE / large bodies, chunked bodies, trailers, bodyless
+   responses (`204`/`304`/`HEAD`), connection-close framing, timeout and error
+   paths, and request-smuggling hardening are treated as HTTP/1 parsing and
+   framing work around `llhttp`. TLS certificate handling, SNI, and mTLS are
+   also future HTTP/1 client work in this same C/Nginx module, handled at the
+   transport layer rather than by changing the protocol scope.
 
-3. **Production-grade code is still ahead.** Turning these spikes into a
-   production implementation still requires, at least:
-   - **more exception / edge-case handling** — streaming and very large response
-     bodies (SSE), bodyless responses (`204`/`304`/`HEAD`), connection-close
-     framing, timeout and error paths, and request-smuggling hardening;
-   - **component decoupling** — clean seams between the FFI contract, the
-     transport / event-loop integration, the TLS layer, and the HTTP
-     parser/framing, so each layer can evolve or be swapped independently.
+4. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
+   should not shape the current HTTP/1 API. If they are added later, they will
+   likely need separate APIs, wrappers, and implementation choices rather than a
+   direct reuse of the HTTP/1 client contract.
 
-In short: the direction is decided and technically validated; the
-production-grade implementation — with fuller error handling and decoupled
-components — is the next phase.
+In short: the current goal is to make the HTTP/1 client stable, efficient, and
+safe by building on `llhttp` and Nginx/OpenResty primitives first. Broader
+protocol work is intentionally deferred.
 
 ## Benchmark
 

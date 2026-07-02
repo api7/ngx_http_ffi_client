@@ -1,7 +1,8 @@
 # Tests
 
 Integration tests use Test::Nginx with an OpenResty binary built with this
-addon.
+addon. The current suite covers the HTTP/1.1 client behavior in this repository;
+HTTP/2 and HTTP/3 are outside the current test scope.
 
 Required environment:
 
