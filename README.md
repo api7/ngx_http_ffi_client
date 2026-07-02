@@ -21,18 +21,33 @@ settled, but the full production behavior is still being built.
 1. **The HTTP/1 implementation strategy is settled.** The client should borrow a
    stable, efficient, security-sensitive protocol parser instead of growing a
    larger hand-written HTTP parser in this repository. The selected HTTP/1
-   parser is the vendored pure-C `llhttp` code under `src/llhttp/`. Nginx keeps
-   ownership of the event loop, timers, buffers, connection lifecycle, and
-   keepalive pool.
+   parser is the vendored pure-C `llhttp` code under `src/llhttp/`.
 
-2. **`llhttp` is the HTTP/1 parsing boundary.** The initial hand-written parser
-   remains useful as historical baseline code while the migration is completed,
-   but new HTTP/1 parsing and framing work should be designed around `llhttp`.
-   The current `llhttp` response parser is selectable with
-   `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1` and benchmarks at near parity with the
-   hand-written C path (see [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
+   `llhttp` is the recommended parser because it fits this module's constraints:
+   it is C code that can be compiled into the Nginx addon without adding another
+   language runtime; it is sans-io, so Nginx remains the only event-loop and
+   transport owner; it is already used by Node.js core and undici for HTTP/1
+   parsing; it covers HTTP/1 framing rules such as `Content-Length`, chunked
+   bodies, trailers, keepalive, and EOF framing; and the local parser benchmark
+   shows near parity with the current hand-written C path. This lets the project
+   reuse a mature HTTP/1 state machine while keeping timers, buffers, TLS,
+   connection lifecycle, and keepalive pooling in Nginx/OpenResty code.
 
-3. **The next HTTP/1 work stays in this stack.** Streaming and incremental
+2. **The current default backend is still transitional.** The repository still
+   builds the initial hand-written parser by default. The `llhttp` response
+   parser is selected explicitly with `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1`.
+   Keeping both build paths is a migration mechanism, not a long-term plan to
+   maintain two independent HTTP/1 parsers. The hand-written parser remains the
+   current baseline while behavior, tests, and remaining edge cases move to the
+   `llhttp`-based path.
+
+3. **`llhttp` is the HTTP/1 parsing boundary for new work.** New HTTP/1 parsing
+   and framing work should be designed around `llhttp`, even though the default
+   build has not flipped yet. The current `llhttp` response parser is selectable
+   with `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1` and benchmarks at near parity with
+   the hand-written C path (see [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
+
+4. **The next HTTP/1 work stays in this stack.** Streaming and incremental
    response delivery, SSE / large bodies, chunked bodies, trailers, bodyless
    responses (`204`/`304`/`HEAD`), connection-close framing, timeout and error
    paths, and request-smuggling hardening are treated as HTTP/1 parsing and
@@ -40,7 +55,7 @@ settled, but the full production behavior is still being built.
    also future HTTP/1 client work in this same C/Nginx module, handled at the
    transport layer rather than by changing the protocol scope.
 
-4. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
+5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
    should not shape the current HTTP/1 API. If they are added later, they will
    likely need separate APIs, wrappers, and implementation choices rather than a
    direct reuse of the HTTP/1 client contract.

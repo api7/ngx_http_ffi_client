@@ -23,6 +23,25 @@ The implementation principle is to borrow the stable, efficient, and
 security-sensitive parser, then keep transport, timers, TLS, buffers, and
 connection reuse in the Nginx/OpenResty module.
 
+The parser choice is based on these constraints:
+
+- **Pure C integration.** `llhttp` can be vendored and compiled into the Nginx
+  addon without adding another language runtime, a second event loop, or
+  cross-language async ownership to the HTTP/1 path.
+- **Sans-io design.** It only consumes bytes and emits parser callbacks, so
+  Nginx/OpenResty still owns sockets, timers, buffers, coroutine yield/resume,
+  and keepalive reuse.
+- **HTTP/1 framing coverage.** It already models status lines, headers,
+  `Content-Length`, chunked bodies, trailers, keepalive, and EOF framing. The
+  hand-written parser currently owns these security-sensitive rules itself and
+  only supports a narrower subset.
+- **Operational maturity.** It is used by Node.js core and undici and is
+  maintained as a dedicated HTTP parser, which is a better risk profile than
+  growing project-local parser logic case by case.
+- **Performance fit.** In the local keepalive parser benchmark, the llhttp path
+  is within about 1% of the hand-written C parser, so the project can gain a
+  more complete parser without giving up the C/Nginx performance goal.
+
 ## What changed
 
 - `src/llhttp/` — vendored llhttp release (v9.4.1, see `VENDORED-SHA.txt`).
@@ -42,7 +61,7 @@ connection reuse in the Nginx/OpenResty module.
 The Lua caller and the FFI request/response structs are **unchanged**: the
 backend is a compile-time swap invisible to `lib/resty/ngx_http_ffi_client.lua`.
 
-## Build
+## Build and default status
 
 ```sh
 # from an openresty source tree, pointing --add-module at this repo
@@ -51,9 +70,14 @@ NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1 NGX_HTTP_LUA_MODULE_DIR=<ngx_lua> \
 make && make install
 ```
 
-Without the env var the build uses the original hand-written parser. That path
-is kept as the current baseline while the llhttp-based HTTP/1 implementation is
-completed.
+Without `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1`, the build still uses the original
+hand-written parser. That is the current default backend and test baseline.
+
+This does not mean the project intends to keep two HTTP/1 parser designs. The
+compile-time switch is a migration boundary: it keeps the existing behavior
+available while the llhttp path absorbs the remaining HTTP/1 edge cases and the
+tests are updated around that behavior. New HTTP/1 parsing and framing work
+should target llhttp rather than extending the hand-written parser.
 
 ## Benchmark
 
