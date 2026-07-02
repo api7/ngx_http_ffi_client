@@ -54,9 +54,11 @@ The parser choice is based on these constraints:
   parser-internal field (`parser.raw`) in favour of `op->received`. The
   request lifecycle, network I/O, coroutine yield/resume, and keepalive pool
   are otherwise unchanged.
-- `config` — `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1` selects the llhttp backend. The
-  vendored llhttp is compiled into a standalone `libllhttp.a` (its generated C
-  is thus exempt from nginx's `-Werror`) and linked via `CORE_LIBS`.
+- `config` — `llhttp` is the default backend. Setting
+  `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=0` explicitly selects the hand-written
+  fallback. The vendored llhttp is compiled into a standalone `libllhttp.a`
+  (its generated C is thus exempt from nginx's `-Werror`) and linked via
+  `CORE_LIBS`.
 
 The Lua caller and the FFI request/response structs are **unchanged**: the
 backend is a compile-time swap invisible to `lib/resty/ngx_http_ffi_client.lua`.
@@ -65,19 +67,21 @@ backend is a compile-time swap invisible to `lib/resty/ngx_http_ffi_client.lua`.
 
 ```sh
 # from an openresty source tree, pointing --add-module at this repo
-NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1 NGX_HTTP_LUA_MODULE_DIR=<ngx_lua> \
+NGX_HTTP_LUA_MODULE_DIR=<ngx_lua> \
   ./configure --add-module=<this repo> ...
 make && make install
 ```
 
-Without `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1`, the build still uses the original
-hand-written parser. That is the current default backend and test baseline.
+The default build uses the `llhttp` parser. To build the hand-written fallback
+for comparison or migration testing, set `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=0`
+during `./configure`.
 
 This does not mean the project intends to keep two HTTP/1 parser designs. The
 compile-time switch is a migration boundary: it keeps the existing behavior
 available while the llhttp path absorbs the remaining HTTP/1 edge cases and the
-tests are updated around that behavior. New HTTP/1 parsing and framing work
-should target llhttp rather than extending the hand-written parser.
+tests are updated around that behavior. CI runs both parser backends, and new
+HTTP/1 parsing and framing work should target llhttp rather than extending the
+hand-written parser.
 
 ## Benchmark
 

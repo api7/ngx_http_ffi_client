@@ -3,6 +3,10 @@ use Test::Nginx::Socket -Base;
 repeat_each(1);
 plan tests => repeat_each() * (blocks() * 3 - 1);
 
+our $UseLLHTTP = !defined($ENV{NGX_HTTP_FFI_CLIENT_USE_LLHTTP})
+    || $ENV{NGX_HTTP_FFI_CLIENT_USE_LLHTTP} eq ''
+    || $ENV{NGX_HTTP_FFI_CLIENT_USE_LLHTTP} eq '1';
+
 our $HttpConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
 };
@@ -105,6 +109,7 @@ GET /t
 
 
 === TEST 3: chunked response is rejected
+--- skip_eval: 3: $::UseLLHTTP
 --- http_config eval: $::HttpConfig
 --- config
     location /chunked {
@@ -141,7 +146,46 @@ GET /t
 
 
 
-=== TEST 4: connection refused is stable nil err
+=== TEST 4: chunked response is accepted by llhttp
+--- skip_eval: 3: !$::UseLLHTTP
+--- http_config eval: $::HttpConfig
+--- config
+    location /chunked {
+        content_by_lua_block {
+            ngx.say("chunked")
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "http",
+                host = "127.0.0.1",
+                port = ngx.var.server_port,
+                method = "GET",
+                path = "/chunked",
+            })
+
+            if not res then
+                ngx.status = 500
+                ngx.say(err)
+                return
+            end
+
+            ngx.print(res.body)
+        }
+    }
+--- request
+GET /t
+--- response_body
+chunked
+--- no_error_log
+[error]
+
+
+
+=== TEST 5: connection refused is stable nil err
 --- http_config eval: $::HttpConfig
 --- config
     location /t {

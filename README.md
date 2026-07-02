@@ -33,19 +33,18 @@ settled, but the full production behavior is still being built.
    reuse a mature HTTP/1 state machine while keeping timers, buffers, TLS,
    connection lifecycle, and keepalive pooling in Nginx/OpenResty code.
 
-2. **The current default backend is still transitional.** The repository still
-   builds the initial hand-written parser by default. The `llhttp` response
-   parser is selected explicitly with `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1`.
-   Keeping both build paths is a migration mechanism, not a long-term plan to
-   maintain two independent HTTP/1 parsers. The hand-written parser remains the
-   current baseline while behavior, tests, and remaining edge cases move to the
-   `llhttp`-based path.
+2. **`llhttp` is the default parser backend.** The repository now builds the
+   `llhttp` response parser by default. The initial hand-written parser remains
+   available only as an explicit fallback and comparison baseline with
+   `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=0`. Keeping both build paths is a migration
+   mechanism, not a long-term plan to maintain two independent HTTP/1 parsers.
+   CI runs both the default `llhttp` backend and the explicit hand-written
+   fallback so the migration boundary stays covered.
 
 3. **`llhttp` is the HTTP/1 parsing boundary for new work.** New HTTP/1 parsing
-   and framing work should be designed around `llhttp`, even though the default
-   build has not flipped yet. The current `llhttp` response parser is selectable
-   with `NGX_HTTP_FFI_CLIENT_USE_LLHTTP=1` and benchmarks at near parity with
-   the hand-written C path (see [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
+   and framing work should be designed around `llhttp`. The default `llhttp`
+   response parser benchmarks at near parity with the hand-written C path (see
+   [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
 
 4. **The next HTTP/1 work stays in this stack.** Streaming and incremental
    response delivery, SSE / large bodies, chunked bodies, trailers, bodyless
