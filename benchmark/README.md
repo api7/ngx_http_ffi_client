@@ -4,6 +4,10 @@ This directory contains the local benchmark for comparing
 `resty.ngx_http_ffi_client` with the Lua cosocket baseline implemented with
 `lua-resty-http` / `resty.http`.
 
+The benchmark is scoped to the current HTTP/1.1 client work. It validates the
+C/Nginx module path and the llhttp-based HTTP/1 direction; it does not evaluate
+HTTP/2, HTTP/3, or alternative protocol APIs.
+
 The benchmark measures maximum QPS when the target OpenResty worker is pinned to
 one CPU core and that core is saturated. It is not a fixed-rate latency test.
 

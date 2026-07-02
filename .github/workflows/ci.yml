@@ -10,14 +10,22 @@ permissions:
 
 jobs:
   test:
-    name: build and test
+    name: build and test (${{ matrix.parser }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - parser: llhttp
+            use_llhttp: "1"
+          - parser: hand-written
+            use_llhttp: "0"
 
     env:
       OPENRESTY_VERSION: 1.31.1.1
       PCRE2_VERSION: "10.45"
-      OPENRESTY_PREFIX: /tmp/openresty
+      OPENRESTY_PREFIX: /tmp/openresty-${{ matrix.parser }}
       TEST_NGINX_LUA_PACKAGE_PATH: ${{ github.workspace }}/lib/?.lua;${{ github.workspace }}/lib/?/init.lua
 
     steps:
@@ -60,6 +68,7 @@ jobs:
           ngx_lua_dir="$(find "$PWD/bundle" -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)"
           test -n "$ngx_lua_dir"
 
+          NGX_HTTP_FFI_CLIENT_USE_LLHTTP="${{ matrix.use_llhttp }}" \
           NGX_HTTP_LUA_MODULE_DIR="$ngx_lua_dir" ./configure \
             --prefix="$OPENRESTY_PREFIX" \
             --with-pcre="/tmp/pcre2-${PCRE2_VERSION}" \
@@ -79,6 +88,7 @@ jobs:
 
       - name: Run integration tests
         env:
+          NGX_HTTP_FFI_CLIENT_USE_LLHTTP: ${{ matrix.use_llhttp }}
           PERL5LIB: /tmp/test-nginx/lib
           TEST_NGINX_BINARY: ${{ env.OPENRESTY_PREFIX }}/nginx/sbin/nginx
         run: prove -r t
