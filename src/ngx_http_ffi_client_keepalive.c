@@ -235,22 +235,44 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     size_t *errlen)
 {
     u_char  *p;
+    size_t   len;
 
-    if (req->keepalive_pool.len != 0) {
-        key->data = req->keepalive_pool.data;
-        key->len = req->keepalive_pool.len;
-        return NGX_OK;
+    /* base key: explicit pool name, else host:port */
+    len = req->keepalive_pool.len != 0
+          ? req->keepalive_pool.len
+          : req->host.len + 1 + NGX_INT_T_LEN;
+
+    /* keep TLS connections out of plaintext pools, and apart by verify + SNI */
+    if (req->ssl) {
+        len += sizeof("|tls|v0|") - 1 + req->ssl_server_name.len;
     }
 
-    key->len = req->host.len + 1 + NGX_INT_T_LEN;
-    key->data = ngx_pnalloc(r->pool, key->len);
+    key->data = ngx_pnalloc(r->pool, len);
     if (key->data == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "no memory");
     }
 
-    p = ngx_cpymem(key->data, req->host.data, req->host.len);
-    *p++ = ':';
-    p = ngx_sprintf(p, "%ui", req->port);
+    p = key->data;
+
+    if (req->keepalive_pool.len != 0) {
+        p = ngx_cpymem(p, req->keepalive_pool.data, req->keepalive_pool.len);
+
+    } else {
+        p = ngx_cpymem(p, req->host.data, req->host.len);
+        *p++ = ':';
+        p = ngx_sprintf(p, "%ui", req->port);
+    }
+
+    if (req->ssl) {
+        p = ngx_cpymem(p, "|tls|v", sizeof("|tls|v") - 1);
+        *p++ = req->ssl_verify ? '1' : '0';
+        *p++ = '|';
+        if (req->ssl_server_name.len) {
+            p = ngx_cpymem(p, req->ssl_server_name.data,
+                           req->ssl_server_name.len);
+        }
+    }
+
     key->len = p - key->data;
 
     return NGX_OK;
