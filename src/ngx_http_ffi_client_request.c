@@ -51,6 +51,7 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     u_char *err, size_t *errlen)
 {
     ngx_int_t                 rc;
+    ngx_uint_t                is_https;
     ngx_connection_t         *c;
     ngx_http_ffi_client_op_t *op;
 
@@ -58,14 +59,24 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "bad request");
     }
 
+    is_https = req->scheme.data != NULL
+               && req->scheme.len == sizeof("https") - 1
+               && ngx_strncmp(req->scheme.data, "https", sizeof("https") - 1)
+                  == 0;
+
     if (req->scheme.data == NULL
-        || !((req->scheme.len == sizeof("http") - 1
-              && ngx_strncmp(req->scheme.data, "http", sizeof("http") - 1) == 0)
-             || (req->scheme.len == sizeof("https") - 1
-                 && ngx_strncmp(req->scheme.data, "https",
-                                sizeof("https") - 1) == 0)))
+        || !(is_https
+             || (req->scheme.len == sizeof("http") - 1
+                 && ngx_strncmp(req->scheme.data, "http",
+                                sizeof("http") - 1) == 0)))
     {
         return ngx_http_ffi_client_set_err(err, errlen, "unsupported scheme");
+    }
+
+    /* scheme and the ssl flag must agree: no plaintext on an https URL */
+    if ((is_https != 0) != (req->ssl != 0)) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "scheme and ssl flag mismatch");
     }
 
     if (req->port == 0 || req->port > 65535) {
@@ -101,6 +112,10 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         op->ssl = 1;
         op->ssl_verify = req->ssl_verify ? 1 : 0;
         if (req->ssl_server_name.len) {
+            if (req->ssl_server_name.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid TLS server name");
+            }
             op->ssl_server_name.len = req->ssl_server_name.len;
             op->ssl_server_name.data = ngx_pnalloc(r->pool,
                                                    req->ssl_server_name.len);
@@ -908,6 +923,14 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
     }
 
     if (op->ssl_verify) {
+        /* verifying the chain without an identity check accepts a cert for any
+         * trusted host, so a server name is mandatory here. */
+        if (op->ssl_server_name.len == 0) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                "TLS verification requires a server name");
+            return;
+        }
+
         verify = SSL_get_verify_result(c->ssl->connection);
 
         if (verify != X509_V_OK) {
@@ -916,9 +939,7 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
             return;
         }
 
-        if (op->ssl_server_name.len
-            && ngx_ssl_check_host(c, &op->ssl_server_name) != NGX_OK)
-        {
+        if (ngx_ssl_check_host(c, &op->ssl_server_name) != NGX_OK) {
             ngx_http_ffi_client_finalize(op, NGX_ERROR,
                                          "TLS certificate host mismatch");
             return;

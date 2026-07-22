@@ -195,3 +195,36 @@ false
 true
 --- no_error_log
 [error]
+
+
+
+=== TEST 4: verify defaults on and rejects the self-signed cert
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                -- ssl_verify omitted: defaults on for https
+            })
+
+            if res then
+                ngx.status = 500
+                ngx.say("unexpected success")
+                return
+            end
+
+            ngx.say(err)
+        }
+    }
+--- request
+GET /t
+--- response_body_like: TLS certificate verify failed
+--- no_error_log
+[error]

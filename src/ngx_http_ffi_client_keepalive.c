@@ -234,18 +234,34 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_str_t *key, u_char *err,
     size_t *errlen)
 {
-    u_char  *p;
-    size_t   len;
+    u_char     *p;
+    size_t      len, base_len, name_len;
+    ngx_str_t   base;
 
     /* base key: explicit pool name, else host:port */
-    len = req->keepalive_pool.len != 0
-          ? req->keepalive_pool.len
-          : req->host.len + 1 + NGX_INT_T_LEN;
+    if (req->keepalive_pool.len != 0) {
+        base.data = req->keepalive_pool.data;
+        base.len = req->keepalive_pool.len;
 
-    /* keep TLS connections out of plaintext pools, and apart by verify + SNI */
-    if (req->ssl) {
-        len += sizeof("|tls|v0|") - 1 + req->ssl_server_name.len;
+    } else {
+        base.data = ngx_pnalloc(r->pool, req->host.len + 1 + NGX_INT_T_LEN);
+        if (base.data == NULL) {
+            return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+        }
+
+        p = ngx_cpymem(base.data, req->host.data, req->host.len);
+        *p++ = ':';
+        p = ngx_sprintf(p, "%ui", req->port);
+        base.len = p - base.data;
     }
+
+    name_len = req->ssl ? req->ssl_server_name.len : 0;
+
+    /* Tagged, length-prefixed encoding so a user pool name can never collide
+     * with a TLS key: [mode][verify][base_len][base][name_len][name].
+     * This keeps TLS connections out of plaintext pools and apart by verify
+     * mode and SNI. */
+    len = 1 + 1 + sizeof(size_t) + base.len + sizeof(size_t) + name_len;
 
     key->data = ngx_pnalloc(r->pool, len);
     if (key->data == NULL) {
@@ -253,24 +269,16 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     }
 
     p = key->data;
+    *p++ = req->ssl ? 1 : 0;
+    *p++ = (req->ssl && req->ssl_verify) ? 1 : 0;
 
-    if (req->keepalive_pool.len != 0) {
-        p = ngx_cpymem(p, req->keepalive_pool.data, req->keepalive_pool.len);
+    base_len = base.len;
+    p = ngx_cpymem(p, &base_len, sizeof(size_t));
+    p = ngx_cpymem(p, base.data, base.len);
 
-    } else {
-        p = ngx_cpymem(p, req->host.data, req->host.len);
-        *p++ = ':';
-        p = ngx_sprintf(p, "%ui", req->port);
-    }
-
-    if (req->ssl) {
-        p = ngx_cpymem(p, "|tls|v", sizeof("|tls|v") - 1);
-        *p++ = req->ssl_verify ? '1' : '0';
-        *p++ = '|';
-        if (req->ssl_server_name.len) {
-            p = ngx_cpymem(p, req->ssl_server_name.data,
-                           req->ssl_server_name.len);
-        }
+    p = ngx_cpymem(p, &name_len, sizeof(size_t));
+    if (name_len) {
+        p = ngx_cpymem(p, req->ssl_server_name.data, name_len);
     }
 
     key->len = p - key->data;
