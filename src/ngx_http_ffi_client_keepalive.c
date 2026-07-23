@@ -235,7 +235,7 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     size_t *errlen)
 {
     u_char     *p;
-    size_t      len, base_len, name_len;
+    size_t      len, base_len, name_len, ca_len;
     ngx_str_t   base;
 
     /* base key: explicit pool name, else host:port */
@@ -256,12 +256,15 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     }
 
     name_len = req->ssl ? req->ssl_server_name.len : 0;
+    ca_len = req->ssl ? req->ssl_trusted_certificate.len : 0;
 
     /* Tagged, length-prefixed encoding so a user pool name can never collide
-     * with a TLS key: [mode][verify][base_len][base][name_len][name].
+     * with a TLS key:
+     * [mode][verify][base_len][base][name_len][name][ca_len][ca].
      * This keeps TLS connections out of plaintext pools and apart by verify
-     * mode and SNI. */
-    len = 1 + 1 + sizeof(size_t) + base.len + sizeof(size_t) + name_len;
+     * mode, SNI, and trusted CA. */
+    len = 1 + 1 + sizeof(size_t) + base.len + sizeof(size_t) + name_len
+          + sizeof(size_t) + ca_len;
 
     key->data = ngx_pnalloc(r->pool, len);
     if (key->data == NULL) {
@@ -279,6 +282,11 @@ ngx_http_ffi_client_keepalive_build_key(ngx_http_request_t *r,
     p = ngx_cpymem(p, &name_len, sizeof(size_t));
     if (name_len) {
         p = ngx_cpymem(p, req->ssl_server_name.data, name_len);
+    }
+
+    p = ngx_cpymem(p, &ca_len, sizeof(size_t));
+    if (ca_len) {
+        p = ngx_cpymem(p, req->ssl_trusted_certificate.data, ca_len);
     }
 
     key->len = p - key->data;

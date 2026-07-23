@@ -55,6 +55,7 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         uintptr_t ssl;
         uintptr_t ssl_verify;
         ngx_http_ffi_client_ffi_str_t ssl_server_name;
+        ngx_http_ffi_client_ffi_str_t ssl_trusted_certificate;
     } ngx_http_ffi_client_ffi_req_t;
 
     typedef struct {
@@ -200,6 +201,13 @@ function _M.request(opts)
     -- verify defaults on for https; pass ssl_verify = false to disable
     local ssl_verify = ssl and opts.ssl_verify ~= false
     local ssl_server_name = opts.ssl_server_name or opts.host
+    local ssl_trusted_certificate = opts.ssl_trusted_certificate
+
+    if ssl_trusted_certificate ~= nil
+       and type(ssl_trusted_certificate) ~= "string"
+    then
+        return nil, "ssl_trusted_certificate must be a string"
+    end
 
     local method = opts.method or "GET"
     local path = opts.path or "/"
@@ -253,6 +261,8 @@ function _M.request(opts)
         set_str(req.body, body),
         set_str(req.keepalive_pool, keepalive_pool),
         set_str(req.ssl_server_name, ssl and ssl_server_name or nil),
+        set_str(req.ssl_trusted_certificate,
+                ssl and ssl_trusted_certificate or nil),
         header_arr,
         header_refs,
     }

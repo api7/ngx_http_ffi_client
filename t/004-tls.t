@@ -228,3 +228,151 @@ GET /t
 --- response_body_like: TLS certificate verify failed
 --- no_error_log
 [error]
+
+
+
+=== TEST 5: verify passes with a trusted CA and matching IP SAN
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                -- ssl_server_name defaults to host (127.0.0.1), an IP literal
+                ssl_trusted_certificate =
+                    "$TEST_NGINX_SERVER_ROOT/html/tls.crt",
+            })
+
+            if not res then
+                ngx.status = 500
+                ngx.say(err)
+                return
+            end
+
+            ngx.say(res.status)
+            ngx.print(res.body)
+        }
+    }
+--- request
+GET /t
+--- response_body
+200
+secure
+--- no_error_log
+[error]
+
+
+
+=== TEST 6: verify passes with a trusted CA and matching DNS SAN
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+                ssl_trusted_certificate =
+                    "$TEST_NGINX_SERVER_ROOT/html/tls.crt",
+            })
+
+            if not res then
+                ngx.status = 500
+                ngx.say(err)
+                return
+            end
+
+            ngx.say(res.status)
+        }
+    }
+--- request
+GET /t
+--- response_body
+200
+--- no_error_log
+[error]
+
+
+
+=== TEST 7: trusted CA but mismatched IP is rejected
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                ssl_server_name = "127.0.0.2",
+                ssl_trusted_certificate =
+                    "$TEST_NGINX_SERVER_ROOT/html/tls.crt",
+            })
+
+            if res then
+                ngx.status = 500
+                ngx.say("unexpected success")
+                return
+            end
+
+            ngx.say(err)
+        }
+    }
+--- request
+GET /t
+--- response_body_like: TLS certificate host mismatch
+--- no_error_log
+[error]
+
+
+
+=== TEST 8: trusted CA but mismatched DNS name is rejected
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                ssl_server_name = "wrong.example",
+                ssl_trusted_certificate =
+                    "$TEST_NGINX_SERVER_ROOT/html/tls.crt",
+            })
+
+            if res then
+                ngx.status = 500
+                ngx.say("unexpected success")
+                return
+            end
+
+            ngx.say(err)
+        }
+    }
+--- request
+GET /t
+--- response_body_like: TLS certificate host mismatch
+--- no_error_log
+[error]
