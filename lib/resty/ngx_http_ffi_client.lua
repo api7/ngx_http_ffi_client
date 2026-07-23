@@ -52,6 +52,10 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         uintptr_t connect_timeout;
         uintptr_t send_timeout;
         uintptr_t read_timeout;
+        uintptr_t ssl;
+        uintptr_t ssl_verify;
+        ngx_http_ffi_client_ffi_str_t ssl_server_name;
+        ngx_http_ffi_client_ffi_str_t ssl_trusted_certificate;
     } ngx_http_ffi_client_ffi_req_t;
 
     typedef struct {
@@ -179,17 +183,38 @@ function _M.request(opts)
     end
 
     local scheme = opts.scheme or "http"
-    if scheme ~= "http" then
+    if scheme ~= "http" and scheme ~= "https" then
         return nil, "unsupported scheme"
     end
+
+    local ssl = scheme == "https"
 
     if type(opts.host) ~= "string" or opts.host == "" then
         return nil, "host is required"
     end
 
-    local port = tonumber(opts.port or 80)
+    local port = tonumber(opts.port or (ssl and 443 or 80))
     if not port or port < 1 or port > 65535 then
         return nil, "bad port"
+    end
+
+    -- verify defaults on for https; pass ssl_verify = false to disable
+    local ssl_verify = ssl and opts.ssl_verify ~= false
+
+    if opts.ssl_server_name ~= nil
+       and (type(opts.ssl_server_name) ~= "string"
+            or opts.ssl_server_name == "")
+    then
+        return nil, "ssl_server_name must be a non-empty string"
+    end
+
+    local ssl_server_name = opts.ssl_server_name or opts.host
+    local ssl_trusted_certificate = opts.ssl_trusted_certificate
+
+    if ssl_trusted_certificate ~= nil
+       and type(ssl_trusted_certificate) ~= "string"
+    then
+        return nil, "ssl_trusted_certificate must be a string"
     end
 
     local method = opts.method or "GET"
@@ -243,6 +268,9 @@ function _M.request(opts)
         set_str(req.path, path),
         set_str(req.body, body),
         set_str(req.keepalive_pool, keepalive_pool),
+        set_str(req.ssl_server_name, ssl and ssl_server_name or nil),
+        set_str(req.ssl_trusted_certificate,
+                ssl and ssl_trusted_certificate or nil),
         header_arr,
         header_refs,
     }
@@ -256,6 +284,8 @@ function _M.request(opts)
     req.connect_timeout = tonumber(opts.connect_timeout or opts.timeout or 60000)
     req.send_timeout = tonumber(opts.send_timeout or opts.timeout or 60000)
     req.read_timeout = tonumber(opts.read_timeout or opts.timeout or 60000)
+    req.ssl = ssl and 1 or 0
+    req.ssl_verify = ssl_verify and 1 or 0
 
     local err = get_string_buf(ERR_BUF_SIZE)
     local errlen = get_size_ptr()

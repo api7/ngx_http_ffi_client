@@ -38,6 +38,10 @@ typedef struct {
     ngx_msec_t                       connect_timeout;
     ngx_msec_t                       send_timeout;
     ngx_msec_t                       read_timeout;
+    ngx_uint_t                       ssl;
+    ngx_uint_t                       ssl_verify;
+    ngx_http_ffi_client_ffi_str_t    ssl_server_name;
+    ngx_http_ffi_client_ffi_str_t    ssl_trusted_certificate;
 } ngx_http_ffi_client_ffi_req_t;
 
 
@@ -102,14 +106,30 @@ typedef struct ngx_http_ffi_client_keepalive_item_s
     ngx_http_ffi_client_keepalive_item_t;
 
 
+#if (NGX_SSL)
+/* one cached client SSL_CTX per distinct trust config (trusted CA path) */
+typedef struct ngx_http_ffi_client_ssl_ctx_s ngx_http_ffi_client_ssl_ctx_t;
+
+struct ngx_http_ffi_client_ssl_ctx_s {
+    ngx_http_ffi_client_ssl_ctx_t    *next;
+    ngx_str_t                         ca;
+    ngx_ssl_t                        *ssl;
+};
+#endif
+
+
 typedef struct {
     ngx_rbtree_t                      pools;
     ngx_rbtree_node_t                 sentinel;
+#if (NGX_SSL)
+    ngx_http_ffi_client_ssl_ctx_t    *ssl_ctxs;
+#endif
 } ngx_http_ffi_client_main_conf_t;
 
 
 typedef enum {
     NGX_HTTP_FFI_CLIENT_CONNECTING = 0,
+    NGX_HTTP_FFI_CLIENT_HANDSHAKING,
     NGX_HTTP_FFI_CLIENT_WRITING,
     NGX_HTTP_FFI_CLIENT_READING,
     NGX_HTTP_FFI_CLIENT_DONE,
@@ -144,6 +164,12 @@ struct ngx_http_ffi_client_op_s {
     unsigned                             keepalive_counted:1;
     unsigned                             reused:1;
     unsigned                             received:1;
+#if (NGX_SSL)
+    ngx_str_t                            ssl_server_name;
+    ngx_str_t                            ssl_trusted_certificate;
+    unsigned                             ssl:1;
+    unsigned                             ssl_verify:1;
+#endif
 };
 
 

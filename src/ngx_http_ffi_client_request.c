@@ -1,5 +1,9 @@
 #include "ngx_http_ffi_client.h"
 
+#if (NGX_SSL)
+#include <openssl/x509v3.h>
+#endif
+
 
 static ngx_int_t ngx_http_ffi_client_get_peer(ngx_peer_connection_t *pc,
     void *data);
@@ -34,6 +38,18 @@ static ngx_int_t ngx_http_ffi_client_handle_write_wait(
     ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_handle_read_wait(
     ngx_http_ffi_client_op_t *op);
+#if (NGX_SSL)
+static ngx_ssl_t *ngx_http_ffi_client_ssl_ctx(
+    ngx_http_ffi_client_main_conf_t *fmcf, ngx_str_t *ca, ngx_log_t *log);
+static ngx_int_t ngx_http_ffi_client_ssl_init_connection(
+    ngx_http_ffi_client_op_t *op);
+static ngx_uint_t ngx_http_ffi_client_name_is_ip(ngx_str_t *name);
+static ngx_int_t ngx_http_ffi_client_ssl_check_identity(ngx_connection_t *c,
+    ngx_str_t *name);
+static ngx_int_t ngx_http_ffi_client_ssl_set_sni(ngx_connection_t *c,
+    ngx_str_t *name);
+static void ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c);
+#endif
 
 
 ngx_int_t
@@ -42,6 +58,7 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     u_char *err, size_t *errlen)
 {
     ngx_int_t                 rc;
+    ngx_uint_t                is_https;
     ngx_connection_t         *c;
     ngx_http_ffi_client_op_t *op;
 
@@ -49,11 +66,24 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "bad request");
     }
 
+    is_https = req->scheme.data != NULL
+               && req->scheme.len == sizeof("https") - 1
+               && ngx_strncmp(req->scheme.data, "https", sizeof("https") - 1)
+                  == 0;
+
     if (req->scheme.data == NULL
-        || req->scheme.len != sizeof("http") - 1
-        || ngx_strncmp(req->scheme.data, "http", sizeof("http") - 1) != 0)
+        || !(is_https
+             || (req->scheme.len == sizeof("http") - 1
+                 && ngx_strncmp(req->scheme.data, "http",
+                                sizeof("http") - 1) == 0)))
     {
         return ngx_http_ffi_client_set_err(err, errlen, "unsupported scheme");
+    }
+
+    /* scheme and the ssl flag must agree: no plaintext on an https URL */
+    if ((is_https != 0) != (req->ssl != 0)) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "scheme and ssl flag mismatch");
     }
 
     if (req->port == 0 || req->port > 65535) {
@@ -83,6 +113,45 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     op->keepalive_idle_timeout = req->keepalive_idle_timeout;
     op->keepalive_pool_size = req->keepalive_pool_size;
     op->errlen = 0;
+
+    if (req->ssl) {
+#if (NGX_SSL)
+        op->ssl = 1;
+        op->ssl_verify = req->ssl_verify ? 1 : 0;
+        if (req->ssl_server_name.len) {
+            if (req->ssl_server_name.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid TLS server name");
+            }
+            op->ssl_server_name.len = req->ssl_server_name.len;
+            op->ssl_server_name.data = ngx_pnalloc(r->pool,
+                                                   req->ssl_server_name.len);
+            if (op->ssl_server_name.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+            ngx_memcpy(op->ssl_server_name.data, req->ssl_server_name.data,
+                       req->ssl_server_name.len);
+        }
+        if (req->ssl_trusted_certificate.len) {
+            if (req->ssl_trusted_certificate.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid trusted certificate");
+            }
+            op->ssl_trusted_certificate.len = req->ssl_trusted_certificate.len;
+            op->ssl_trusted_certificate.data =
+                ngx_pnalloc(r->pool, req->ssl_trusted_certificate.len);
+            if (op->ssl_trusted_certificate.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+            ngx_memcpy(op->ssl_trusted_certificate.data,
+                       req->ssl_trusted_certificate.data,
+                       req->ssl_trusted_certificate.len);
+        }
+#else
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "TLS is not supported by this build");
+#endif
+    }
 
     op->coctx = ngx_http_lua_get_cur_co_ctx(r);
     if (op->coctx == NULL) {
@@ -165,7 +234,14 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
                                     op);
 
     if (rc == NGX_OK) {
+        /* TCP already connected: TLS still needs an async handshake, so route
+         * it through the CONNECTING branch of the write handler. */
+#if (NGX_SSL)
+        op->state = op->ssl ? NGX_HTTP_FFI_CLIENT_CONNECTING
+                            : NGX_HTTP_FFI_CLIENT_WRITING;
+#else
         op->state = NGX_HTTP_FFI_CLIENT_WRITING;
+#endif
         ngx_post_event(c->write, &ngx_posted_events);
         return NGX_AGAIN;
     }
@@ -471,6 +547,13 @@ ngx_http_ffi_client_write_handler(ngx_event_t *wev)
             ngx_del_timer(wev);
         }
 
+#if (NGX_SSL)
+        if (op->ssl && op->peer.connection->ssl == NULL) {
+            (void) ngx_http_ffi_client_ssl_init_connection(op);
+            return;
+        }
+#endif
+
         op->state = NGX_HTTP_FFI_CLIENT_WRITING;
     }
 
@@ -704,6 +787,313 @@ ngx_http_ffi_client_handle_read_wait(ngx_http_ffi_client_op_t *op)
 
     return NGX_AGAIN;
 }
+
+
+#if (NGX_SSL)
+
+/*
+ * Lazily build one client SSL_CTX per distinct trust config, cached on
+ * main_conf. `ca` is an optional trusted-CA file path (empty = system store
+ * only). Returns NULL on failure without caching a half-built context.
+ */
+static ngx_ssl_t *
+ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
+    ngx_str_t *ca, ngx_log_t *log)
+{
+    u_char                         *path;
+    ngx_ssl_t                      *ssl;
+    ngx_pool_cleanup_t             *cln;
+    ngx_http_ffi_client_ssl_ctx_t  *node;
+
+    for (node = fmcf->ssl_ctxs; node != NULL; node = node->next) {
+        /* guard memcmp: NULL pointers with len 0 are UB */
+        if (node->ca.len == ca->len
+            && (ca->len == 0
+                || ngx_memcmp(node->ca.data, ca->data, ca->len) == 0))
+        {
+            return node->ssl;
+        }
+    }
+
+    ssl = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_ssl_t));
+    if (ssl == NULL) {
+        return NULL;
+    }
+
+    ssl->log = ngx_cycle->log;
+
+    if (ngx_ssl_create(ssl, NGX_SSL_TLSv1_2 | NGX_SSL_TLSv1_3, NULL) != NGX_OK) {
+        return NULL;
+    }
+
+    /* verify mode stays NONE so the handshake completes and we inspect the
+     * result ourselves. An unusable trust store is a hard init failure: don't
+     * cache a context that would fail every verify-on request. */
+    if (SSL_CTX_set_default_verify_paths(ssl->ctx) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "SSL_CTX_set_default_verify_paths() failed");
+        ngx_ssl_cleanup_ctx(ssl);
+        return NULL;
+    }
+
+    if (ca->len) {
+        path = ngx_pnalloc(ngx_cycle->pool, ca->len + 1);
+        if (path == NULL) {
+            ngx_ssl_cleanup_ctx(ssl);
+            return NULL;
+        }
+
+        ngx_memcpy(path, ca->data, ca->len);
+        path[ca->len] = '\0';
+
+        if (SSL_CTX_load_verify_locations(ssl->ctx, (char *) path, NULL) == 0) {
+            ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                          "SSL_CTX_load_verify_locations(\"%s\") failed", path);
+            ngx_ssl_cleanup_ctx(ssl);
+            return NULL;
+        }
+    }
+
+    SSL_CTX_set_verify_depth(ssl->ctx, 100);
+
+    /* build the cache node before registering cleanup so an alloc failure
+     * frees the context instead of orphaning it until worker exit */
+    node = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_http_ffi_client_ssl_ctx_t));
+    if (node == NULL) {
+        ngx_ssl_cleanup_ctx(ssl);
+        return NULL;
+    }
+
+    node->ssl = ssl;
+    node->ca.len = ca->len;
+    if (ca->len) {
+        node->ca.data = ngx_pnalloc(ngx_cycle->pool, ca->len);
+        if (node->ca.data == NULL) {
+            ngx_ssl_cleanup_ctx(ssl);
+            return NULL;
+        }
+        ngx_memcpy(node->ca.data, ca->data, ca->len);
+    }
+
+    cln = ngx_pool_cleanup_add(ngx_cycle->pool, 0);
+    if (cln == NULL) {
+        ngx_ssl_cleanup_ctx(ssl);
+        return NULL;
+    }
+
+    cln->handler = ngx_ssl_cleanup_ctx;
+    cln->data = ssl;
+
+    node->next = fmcf->ssl_ctxs;
+    fmcf->ssl_ctxs = node;
+
+    return ssl;
+}
+
+
+/* true if name is an IPv4/IPv6 literal rather than a DNS name */
+static ngx_uint_t
+ngx_http_ffi_client_name_is_ip(ngx_str_t *name)
+{
+    if (ngx_inet_addr(name->data, name->len) != INADDR_NONE) {
+        return 1;
+    }
+
+#if (NGX_HAVE_INET6)
+    {
+        u_char  buf[16];
+
+        if (ngx_inet6_addr(name->data, name->len, buf) == NGX_OK) {
+            return 1;
+        }
+    }
+#endif
+
+    return 0;
+}
+
+
+/*
+ * Match the peer cert against the target name. ngx_ssl_check_host covers DNS
+ * SANs only, so IP literals are matched against iPAddress SANs directly.
+ */
+static ngx_int_t
+ngx_http_ffi_client_ssl_check_identity(ngx_connection_t *c, ngx_str_t *name)
+{
+    u_char    *ip;
+    X509      *cert;
+    ngx_int_t  rc;
+
+    if (!ngx_http_ffi_client_name_is_ip(name)) {
+        return ngx_ssl_check_host(c, name);
+    }
+
+    cert = SSL_get_peer_certificate(c->ssl->connection);
+    if (cert == NULL) {
+        return NGX_ERROR;
+    }
+
+    ip = ngx_pnalloc(c->pool, name->len + 1);
+    if (ip == NULL) {
+        X509_free(cert);
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(ip, name->data, name->len);
+    ip[name->len] = '\0';
+
+    rc = (X509_check_ip_asc(cert, (char *) ip, 0) == 1) ? NGX_OK : NGX_ERROR;
+
+    X509_free(cert);
+
+    return rc;
+}
+
+
+/* SNI for DNS names only; IP literals are not valid SNI hostnames. */
+static ngx_int_t
+ngx_http_ffi_client_ssl_set_sni(ngx_connection_t *c, ngx_str_t *name)
+{
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    u_char  *p;
+
+    if (ngx_http_ffi_client_name_is_ip(name)) {
+        return NGX_OK;
+    }
+
+    p = ngx_pnalloc(c->pool, name->len + 1);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(p, name->data, name->len);
+    p[name->len] = '\0';
+
+    if (SSL_set_tlsext_host_name(c->ssl->connection, (char *) p) == 0) {
+        ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
+                      "SSL_set_tlsext_host_name(\"%s\") failed", p);
+        return NGX_ERROR;
+    }
+#endif
+
+    return NGX_OK;
+}
+
+
+/* Start the TLS handshake once TCP is connected. */
+static ngx_int_t
+ngx_http_ffi_client_ssl_init_connection(ngx_http_ffi_client_op_t *op)
+{
+    ngx_int_t                         rc;
+    ngx_ssl_t                        *ssl;
+    ngx_connection_t                 *c;
+    ngx_http_ffi_client_main_conf_t  *fmcf;
+
+    c = op->peer.connection;
+
+    fmcf = ngx_http_get_module_main_conf(op->r, ngx_http_ffi_client_module);
+
+    ssl = ngx_http_ffi_client_ssl_ctx(fmcf, &op->ssl_trusted_certificate,
+                                      c->log);
+    if (ssl == NULL) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to init TLS");
+        return NGX_ERROR;
+    }
+
+    if (ngx_ssl_create_connection(ssl, c, NGX_SSL_BUFFER | NGX_SSL_CLIENT)
+        != NGX_OK)
+    {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                     "failed to create TLS connection");
+        return NGX_ERROR;
+    }
+
+    if (op->ssl_server_name.len
+        && ngx_http_ffi_client_ssl_set_sni(c, &op->ssl_server_name) != NGX_OK)
+    {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to set TLS SNI");
+        return NGX_ERROR;
+    }
+
+    op->state = NGX_HTTP_FFI_CLIENT_HANDSHAKING;
+
+    rc = ngx_ssl_handshake(c);
+
+    if (rc == NGX_AGAIN) {
+        if (!c->read->timer_set) {
+            ngx_add_timer(c->read, op->connect_timeout);
+        }
+
+        c->ssl->handler = ngx_http_ffi_client_ssl_handshake_handler;
+        return NGX_AGAIN;
+    }
+
+    ngx_http_ffi_client_ssl_handshake_handler(c);
+    return NGX_OK;
+}
+
+
+/* Called when the handshake settles (done, failed, or timed out). */
+static void
+ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
+{
+    long                       verify;
+    ngx_http_ffi_client_op_t  *op;
+
+    op = c->data;
+
+    if (!c->ssl->handshaked) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR,
+            (c->read->timedout || c->write->timedout)
+            ? "TLS handshake timed out" : "TLS handshake failed");
+        return;
+    }
+
+    if (op->ssl_verify) {
+        /* verifying the chain without an identity check accepts a cert for any
+         * trusted host, so a server name is mandatory here. */
+        if (op->ssl_server_name.len == 0) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                "TLS verification requires a server name");
+            return;
+        }
+
+        verify = SSL_get_verify_result(c->ssl->connection);
+
+        if (verify != X509_V_OK) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                         "TLS certificate verify failed");
+            return;
+        }
+
+        if (ngx_http_ffi_client_ssl_check_identity(c, &op->ssl_server_name)
+            != NGX_OK)
+        {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                         "TLS certificate host mismatch");
+            return;
+        }
+    }
+
+    if (c->read->timer_set) {
+        ngx_del_timer(c->read);
+    }
+
+    if (c->write->timer_set) {
+        ngx_del_timer(c->write);
+    }
+
+    /* ngx_ssl_handshake swapped c->recv/c->send to the TLS variants; restore
+     * our own event handlers and send the request. */
+    c->read->handler = ngx_http_ffi_client_read_handler;
+    c->write->handler = ngx_http_ffi_client_write_handler;
+
+    op->state = NGX_HTTP_FFI_CLIENT_WRITING;
+
+    (void) ngx_http_ffi_client_do_write(op);
+}
+
+#endif
 
 
 static void
