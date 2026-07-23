@@ -200,6 +200,14 @@ function _M.request(opts)
 
     -- verify defaults on for https; pass ssl_verify = false to disable
     local ssl_verify = ssl and opts.ssl_verify ~= false
+
+    if opts.ssl_server_name ~= nil
+       and (type(opts.ssl_server_name) ~= "string"
+            or opts.ssl_server_name == "")
+    then
+        return nil, "ssl_server_name must be a non-empty string"
+    end
+
     local ssl_server_name = opts.ssl_server_name or opts.host
     local ssl_trusted_certificate = opts.ssl_trusted_certificate
 

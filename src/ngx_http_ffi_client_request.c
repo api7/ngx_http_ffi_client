@@ -806,8 +806,10 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
     ngx_http_ffi_client_ssl_ctx_t  *node;
 
     for (node = fmcf->ssl_ctxs; node != NULL; node = node->next) {
+        /* guard memcmp: NULL pointers with len 0 are UB */
         if (node->ca.len == ca->len
-            && ngx_memcmp(node->ca.data, ca->data, ca->len) == 0)
+            && (ca->len == 0
+                || ngx_memcmp(node->ca.data, ca->data, ca->len) == 0))
         {
             return node->ssl;
         }
@@ -854,17 +856,11 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
 
     SSL_CTX_set_verify_depth(ssl->ctx, 100);
 
-    cln = ngx_pool_cleanup_add(ngx_cycle->pool, 0);
-    if (cln == NULL) {
-        ngx_ssl_cleanup_ctx(ssl);
-        return NULL;
-    }
-
-    cln->handler = ngx_ssl_cleanup_ctx;
-    cln->data = ssl;
-
+    /* build the cache node before registering cleanup so an alloc failure
+     * frees the context instead of orphaning it until worker exit */
     node = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_http_ffi_client_ssl_ctx_t));
     if (node == NULL) {
+        ngx_ssl_cleanup_ctx(ssl);
         return NULL;
     }
 
@@ -873,10 +869,20 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
     if (ca->len) {
         node->ca.data = ngx_pnalloc(ngx_cycle->pool, ca->len);
         if (node->ca.data == NULL) {
+            ngx_ssl_cleanup_ctx(ssl);
             return NULL;
         }
         ngx_memcpy(node->ca.data, ca->data, ca->len);
     }
+
+    cln = ngx_pool_cleanup_add(ngx_cycle->pool, 0);
+    if (cln == NULL) {
+        ngx_ssl_cleanup_ctx(ssl);
+        return NULL;
+    }
+
+    cln->handler = ngx_ssl_cleanup_ctx;
+    cln->data = ssl;
 
     node->next = fmcf->ssl_ctxs;
     fmcf->ssl_ctxs = node;
