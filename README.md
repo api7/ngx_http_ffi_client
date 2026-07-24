@@ -18,8 +18,8 @@ The current implementation target is HTTP/1.x only:
 
 Two entry points, both on `resty.ngx_http_ffi_client`.
 
-**`request_uri(opts)`** — one shot: connect, send, read the whole response,
-release the connection.
+**`request_uri(opts)`** — one shot: connect, send, read the whole response, then
+give the connection back to the pool when `keepalive` is set, or close it.
 
 ```lua
 local client = require "resty.ngx_http_ffi_client"
@@ -96,12 +96,14 @@ settled, but the full production behavior is still being built.
 
 4. **The next HTTP/1 work stays in this stack.** Incremental response delivery
    is in: the stateful object resumes at the headers and pulls the body one
-   `llhttp` span at a time, so SSE and large bodies stream. What is left —
-   trailers, bodyless responses (`204`/`304`/`HEAD`), connection-close framing,
-   timeout and error paths, and request-smuggling hardening — is treated as
-   HTTP/1 parsing and framing work around `llhttp`. mTLS is future client work
-   in this same C/Nginx module, handled at the transport layer rather than by
-   changing the protocol scope.
+   `llhttp` span at a time, so SSE and large bodies stream. Connection-close
+   framing ends a streamed response cleanly; the one-shot `request_uri()` still
+   treats a close mid-response as a truncated read. What is left — trailers,
+   bodyless responses (`204`/`304`/`HEAD`), close framing on the one-shot path,
+   the remaining timeout and error paths, and request-smuggling hardening — is
+   treated as HTTP/1 parsing and framing work around `llhttp`. mTLS is future
+   client work in this same C/Nginx module, handled at the transport layer
+   rather than by changing the protocol scope.
 
 5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
    should not shape the current HTTP/1 API. If they are added later, they will

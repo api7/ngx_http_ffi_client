@@ -812,6 +812,10 @@ function client.set_keepalive(self, timeout, pool_size)
     end
 
     local r = get_request()
+    if not r then
+        error("no request found", 2)
+    end
+
     local err, errlen = new_err_buf()
     local rc = c_keepalive(r, self._op, timeout or 0, pool_size or 0, err,
                            errlen)
