@@ -49,19 +49,34 @@ static void ngx_http_ffi_client_keepalive_read_handler(ngx_event_t *ev);
 static ngx_int_t ngx_http_ffi_client_keepalive_close_handler(ngx_event_t *ev);
 
 
+/* Bind the op to its pool. Runs before the peer address is known, so it only
+ * needs the request parameters that make up the pool key. */
 ngx_int_t
-ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
+ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
     u_char *err, size_t *errlen)
+{
+    if (ngx_http_ffi_client_keepalive_get_pool(r, op, req, err, errlen)
+        == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_http_ffi_client_keepalive_get(ngx_http_ffi_client_op_t *op)
 {
     ngx_queue_t                         *q, *next;
     ngx_connection_t                    *c;
     ngx_http_ffi_client_keepalive_item_t *item;
     ngx_http_ffi_client_keepalive_pool_t *pool;
 
-    pool = ngx_http_ffi_client_keepalive_get_pool(r, op, req, err, errlen);
+    pool = op->keepalive_pool;
     if (pool == NULL) {
-        return NGX_ERROR;
+        return NGX_DECLINED;
     }
 
     for (q = ngx_queue_head(&pool->cache);
@@ -96,7 +111,7 @@ ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
 
         c->idle = 0;
         c->data = op;
-        c->log = r->connection->log;
+        c->log = op->r->connection->log;
         c->pool->log = c->log;
         c->read->log = c->log;
         c->write->log = c->log;
@@ -427,6 +442,12 @@ static ngx_uint_t
 ngx_http_ffi_client_keepalive_match(
     ngx_http_ffi_client_keepalive_item_t *item, ngx_peer_connection_t *peer)
 {
+    /* an unresolved host has no address yet: the pool key already pins the
+     * host, port and TLS config, so any live connection in it fits */
+    if (peer->sockaddr == NULL) {
+        return 1;
+    }
+
     return item->socklen == peer->socklen
            && ngx_memn2cmp((u_char *) &item->sockaddr,
                            (u_char *) peer->sockaddr,

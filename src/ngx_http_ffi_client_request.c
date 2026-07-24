@@ -23,6 +23,14 @@ static ngx_int_t ngx_http_ffi_client_build_request(ngx_http_request_t *r,
 static ngx_int_t ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_op_t *op,
     u_char *err, size_t *errlen);
+static ngx_int_t ngx_http_ffi_client_connect(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_do_connect(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_resolve(ngx_http_ffi_client_op_t *op);
+static void ngx_http_ffi_client_resolve_handler(ngx_resolver_ctx_t *ctx);
+static void ngx_http_ffi_client_set_cleanup(ngx_http_ffi_client_op_t *op);
+static void ngx_http_ffi_client_clear_cleanup(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_export_err(ngx_http_ffi_client_op_t *op,
+    u_char *err, size_t *errlen);
 static void ngx_http_ffi_client_write_handler(ngx_event_t *wev);
 static void ngx_http_ffi_client_read_handler(ngx_event_t *rev);
 static ngx_int_t ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op);
@@ -59,7 +67,6 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
 {
     ngx_int_t                 rc;
     ngx_uint_t                is_https;
-    ngx_connection_t         *c;
     ngx_http_ffi_client_op_t *op;
 
     if (req == NULL || resp == NULL) {
@@ -179,59 +186,98 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    if (ngx_http_ffi_client_parse_peer(r, req, op, err, errlen) != NGX_OK) {
+    if (ngx_http_ffi_client_parse_peer(r, req, op, err, errlen) == NGX_ERROR) {
         return NGX_ERROR;
     }
 
-    if (op->keepalive) {
-        rc = ngx_http_ffi_client_keepalive_get(r, op, req, err, errlen);
-        if (rc == NGX_OK) {
-            if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
-                ngx_http_ffi_client_close(op);
-                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
-            }
-
-            ngx_http_lua_cleanup_co_ctx_pending_operation(op->coctx);
-            ngx_http_lua_set_co_ctx_cleanup(op->coctx,
-                                            ngx_http_ffi_client_cleanup, op);
-
-            op->state = NGX_HTTP_FFI_CLIENT_WRITING;
-            ngx_post_event(op->peer.connection->write, &ngx_posted_events);
-            return NGX_AGAIN;
-        }
-
-        if (rc == NGX_ERROR) {
-            return NGX_ERROR;
-        }
+    if (op->keepalive
+        && ngx_http_ffi_client_keepalive_bind(r, op, req, err, errlen)
+           != NGX_OK)
+    {
+        return NGX_ERROR;
     }
 
+    /* nothing past this point reads req: the FFI struct belongs to Lua and the
+     * connect can outlive this call */
+
+    rc = ngx_http_ffi_client_connect(op);
+
+    if (rc == NGX_ERROR) {
+        return ngx_http_ffi_client_export_err(op, err, errlen);
+    }
+
+    return rc;
+}
+
+
+/*
+ * Acquire a connection: reuse a pooled one, resolve the host when it is a name,
+ * else connect. Returns NGX_AGAIN once the operation is pending, or NGX_ERROR
+ * with op->err set. Never resumes the coroutine.
+ */
+static ngx_int_t
+ngx_http_ffi_client_connect(ngx_http_ffi_client_op_t *op)
+{
+    ngx_int_t  rc;
+
+    if (op->keepalive && ngx_http_ffi_client_keepalive_get(op) == NGX_OK) {
+        if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
+            ngx_http_ffi_client_close(op);
+            return ngx_http_ffi_client_set_op_err(op, "no memory");
+        }
+
+        ngx_http_ffi_client_set_cleanup(op);
+
+        op->state = NGX_HTTP_FFI_CLIENT_WRITING;
+        ngx_post_event(op->peer.connection->write, &ngx_posted_events);
+        return NGX_AGAIN;
+    }
+
+    if (op->peer.sockaddr == NULL) {
+        /* a hostname with nothing pooled: resolve first. The cosocket checks
+         * its pool before resolving too, so a reused connection costs no DNS. */
+        rc = ngx_http_ffi_client_resolve(op);
+
+        if (rc != NGX_OK) {
+            /* NGX_AGAIN while the answer is pending, NGX_ERROR on failure */
+            return rc;
+        }
+
+        /* answered from the resolver cache */
+    }
+
+    return ngx_http_ffi_client_do_connect(op);
+}
+
+
+/* Open the connection to an already known peer address. */
+static ngx_int_t
+ngx_http_ffi_client_do_connect(ngx_http_ffi_client_op_t *op)
+{
+    ngx_int_t          rc;
+    ngx_connection_t  *c;
+
     op->peer.get = ngx_http_ffi_client_get_peer;
-    op->peer.log = r->connection->log;
+    op->peer.log = op->r->connection->log;
     op->peer.log_error = NGX_ERROR_ERR;
 
     rc = ngx_event_connect_peer(&op->peer);
 
-    if (rc == NGX_ERROR) {
-        return ngx_http_ffi_client_set_err(err, errlen, "connect failed");
+    if (rc == NGX_ERROR || rc == NGX_DECLINED) {
+        return ngx_http_ffi_client_set_op_err(op, "connect failed");
     }
 
     if (rc == NGX_BUSY) {
-        return ngx_http_ffi_client_set_err(err, errlen, "no live connection");
-    }
-
-    if (rc == NGX_DECLINED) {
-        return ngx_http_ffi_client_set_err(err, errlen, "connect failed");
+        return ngx_http_ffi_client_set_op_err(op, "no live connection");
     }
 
     c = op->peer.connection;
     if (ngx_http_ffi_client_prepare_connection(op) != NGX_OK) {
         ngx_http_ffi_client_close(op);
-        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+        return ngx_http_ffi_client_set_op_err(op, "no memory");
     }
 
-    ngx_http_lua_cleanup_co_ctx_pending_operation(op->coctx);
-    ngx_http_lua_set_co_ctx_cleanup(op->coctx, ngx_http_ffi_client_cleanup,
-                                    op);
+    ngx_http_ffi_client_set_cleanup(op);
 
     if (rc == NGX_OK) {
         /* TCP already connected: TLS still needs an async handshake, so route
@@ -251,9 +297,9 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
 
     if (ngx_handle_write_event(c->write, 0) != NGX_OK) {
         ngx_http_ffi_client_close(op);
-        ngx_http_lua_set_co_ctx_cleanup(op->coctx, NULL, NULL);
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "failed to handle write event");
+        ngx_http_ffi_client_clear_cleanup(op);
+        return ngx_http_ffi_client_set_op_err(op,
+                                              "failed to handle write event");
     }
 
     return NGX_AGAIN;
@@ -468,6 +514,10 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
 }
 
 
+/*
+ * Set the peer address from the request host. Returns NGX_DECLINED when the
+ * host is a name that has to go through the resolver.
+ */
 static ngx_int_t
 ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_op_t *op,
@@ -475,6 +525,7 @@ ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
 {
     u_char      *text, *p;
     size_t       len;
+    ngx_int_t    rc;
     ngx_addr_t   addr;
     ngx_str_t    host;
     ngx_uint_t   ipv6;
@@ -496,19 +547,217 @@ ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
         p = ngx_snprintf(text, len, "%V:%ui", &host, req->port);
     }
 
-    ngx_memzero(&addr, sizeof(ngx_addr_t));
-
-    if (ngx_parse_addr_port(r->pool, &addr, text, p - text) != NGX_OK) {
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "host must be an IP address");
-    }
-
-    op->peer.sockaddr = addr.sockaddr;
-    op->peer.socklen = addr.socklen;
-    op->peer_name = addr.name;
+    op->port = (in_port_t) req->port;
+    op->peer_name.data = text;
+    op->peer_name.len = p - text;
     op->peer.name = &op->peer_name;
 
-    return NGX_OK;
+    ngx_memzero(&addr, sizeof(ngx_addr_t));
+
+    rc = ngx_parse_addr_port(r->pool, &addr, text, p - text);
+
+    if (rc == NGX_OK) {
+        op->peer.sockaddr = addr.sockaddr;
+        op->peer.socklen = addr.socklen;
+        return NGX_OK;
+    }
+
+    if (rc != NGX_DECLINED) {
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    /* a name: keep a NUL-terminated copy for the resolver, which needs it to
+     * outlive this call */
+    op->resolve_name.data = ngx_pnalloc(r->pool, host.len + 1);
+    if (op->resolve_name.data == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    ngx_memcpy(op->resolve_name.data, host.data, host.len);
+    op->resolve_name.data[host.len] = '\0';
+    op->resolve_name.len = host.len;
+
+    return NGX_DECLINED;
+}
+
+
+/*
+ * Start resolving the host through the nginx resolver, matching the cosocket's
+ * connect-time semantics. Returns NGX_OK when the resolver answered inline from
+ * its cache, NGX_AGAIN once the answer is pending, or NGX_ERROR.
+ */
+static ngx_int_t
+ngx_http_ffi_client_resolve(ngx_http_ffi_client_op_t *op)
+{
+    ngx_int_t                  rc;
+    ngx_resolver_ctx_t        *rctx, temp;
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_get_module_loc_conf(op->r, ngx_http_core_module);
+
+    temp.name = op->resolve_name;
+
+    rctx = ngx_resolve_start(clcf->resolver, &temp);
+    if (rctx == NULL) {
+        return ngx_http_ffi_client_set_op_err(op,
+                                              "failed to start the resolver");
+    }
+
+    if (rctx == NGX_NO_RESOLVER) {
+        op->errlen = ngx_snprintf(op->err, sizeof(op->err),
+                                  "no resolver defined to resolve \"%V\"",
+                                  &op->resolve_name) - op->err;
+        return NGX_ERROR;
+    }
+
+    rctx->name = op->resolve_name;
+    rctx->handler = ngx_http_ffi_client_resolve_handler;
+    rctx->data = op;
+    rctx->timeout = clcf->resolver_timeout;
+
+    op->resolve_ctx = rctx;
+
+    /* the resolver now holds a pointer to op: cancel it if the coroutine dies */
+    ngx_http_ffi_client_set_cleanup(op);
+
+    /* a cached name is answered inline: let the handler only record the result
+     * so the connect is driven from here, before the coroutine has yielded */
+    op->resolve_inline = 1;
+    rc = ngx_resolve_name(rctx);
+    op->resolve_inline = 0;
+
+    if (rc != NGX_OK) {
+        op->resolve_ctx = NULL;
+        ngx_http_ffi_client_clear_cleanup(op);
+        op->errlen = ngx_snprintf(op->err, sizeof(op->err),
+                                  "%V could not be resolved",
+                                  &op->resolve_name) - op->err;
+        return NGX_ERROR;
+    }
+
+    if (op->resolve_ctx != NULL) {
+        return NGX_AGAIN;
+    }
+
+    return op->resolve_failed ? NGX_ERROR : NGX_OK;
+}
+
+
+/* Called when the resolver answers (or fails, or times out). */
+static void
+ngx_http_ffi_client_resolve_handler(ngx_resolver_ctx_t *ctx)
+{
+    u_char                    *p;
+    socklen_t                  socklen;
+    ngx_uint_t                 i;
+    struct sockaddr           *sockaddr;
+    ngx_http_ffi_client_op_t  *op;
+
+    op = ctx->data;
+
+    if (ctx->state || ctx->naddrs == 0) {
+        op->errlen = ngx_snprintf(op->err, sizeof(op->err),
+                                  "%V could not be resolved (%i: %s)",
+                                  &ctx->name, (ngx_int_t) ctx->state,
+                                  ngx_resolver_strerror(ctx->state)) - op->err;
+        goto failed;
+    }
+
+    /* pick one of the answers at random, as the cosocket does */
+    i = ctx->naddrs == 1 ? 0 : (ngx_uint_t) ngx_random() % ctx->naddrs;
+
+    socklen = ctx->addrs[i].socklen;
+    sockaddr = (struct sockaddr *) &op->sockaddr;
+
+    ngx_memcpy(sockaddr, ctx->addrs[i].sockaddr, socklen);
+    ngx_inet_set_port(sockaddr, op->port);
+
+    p = ngx_pnalloc(op->r->pool, NGX_SOCKADDR_STRLEN);
+    if (p == NULL) {
+        ngx_http_ffi_client_set_op_err(op, "no memory");
+        goto failed;
+    }
+
+    op->peer_name.data = p;
+    op->peer_name.len = ngx_sock_ntop(sockaddr, socklen, p,
+                                      NGX_SOCKADDR_STRLEN, 1);
+    op->peer.sockaddr = sockaddr;
+    op->peer.socklen = socklen;
+
+    ngx_resolve_name_done(ctx);
+    op->resolve_ctx = NULL;
+
+    if (op->resolve_inline) {
+        return;
+    }
+
+    if (ngx_http_ffi_client_do_connect(op) == NGX_ERROR) {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+    }
+
+    return;
+
+failed:
+
+    ngx_resolve_name_done(ctx);
+    op->resolve_ctx = NULL;
+    op->resolve_failed = 1;
+
+    if (op->resolve_inline) {
+        return;
+    }
+
+    ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+}
+
+
+/*
+ * Register the coroutine cleanup once: it cancels a pending resolve and closes
+ * the connection if the coroutine goes away mid-flight.
+ */
+static void
+ngx_http_ffi_client_set_cleanup(ngx_http_ffi_client_op_t *op)
+{
+    if (op->cleanup_set) {
+        return;
+    }
+
+    ngx_http_lua_cleanup_co_ctx_pending_operation(op->coctx);
+    ngx_http_lua_set_co_ctx_cleanup(op->coctx, ngx_http_ffi_client_cleanup, op);
+    op->cleanup_set = 1;
+}
+
+
+static void
+ngx_http_ffi_client_clear_cleanup(ngx_http_ffi_client_op_t *op)
+{
+    if (!op->cleanup_set) {
+        return;
+    }
+
+    ngx_http_lua_set_co_ctx_cleanup(op->coctx, NULL, NULL);
+    op->cleanup_set = 0;
+}
+
+
+/* Hand an error raised on the op back to a caller that has not yielded yet. */
+static ngx_int_t
+ngx_http_ffi_client_export_err(ngx_http_ffi_client_op_t *op, u_char *err,
+    size_t *errlen)
+{
+    /* the op is done and never resumes, so it must not outlive this call as a
+     * pending cleanup */
+    ngx_http_ffi_client_clear_cleanup(op);
+
+    if (op->errlen == 0) {
+        ngx_http_ffi_client_set_op_err(op, "request failed");
+    }
+
+    if (err != NULL && errlen != NULL && *errlen > 0) {
+        *errlen = ngx_snprintf(err, *errlen, "%*s", op->errlen, op->err) - err;
+    }
+
+    return NGX_ERROR;
 }
 
 
@@ -1096,17 +1345,28 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
 #endif
 
 
+/* lua-nginx-module hands the co ctx itself to the cleanup, not the data */
 static void
 ngx_http_ffi_client_cleanup(void *data)
 {
-    ngx_http_ffi_client_op_t *op = data;
+    ngx_http_lua_co_ctx_t    *coctx = data;
+    ngx_http_ffi_client_op_t *op;
+
+    op = ngx_http_lua_get_co_ctx_data(coctx);
 
     if (op == NULL || op->resumed) {
         return;
     }
 
     op->resumed = 1;
+    op->cleanup_set = 0;
     op->state = NGX_HTTP_FFI_CLIENT_FAILED;
+
+    if (op->resolve_ctx != NULL) {
+        ngx_resolve_name_done(op->resolve_ctx);
+        op->resolve_ctx = NULL;
+    }
+
     ngx_http_ffi_client_close(op);
 }
 
@@ -1131,6 +1391,10 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     op->resumed = 1;
     op->state = rc == NGX_OK ? NGX_HTTP_FFI_CLIENT_DONE
                              : NGX_HTTP_FFI_CLIENT_FAILED;
+
+    /* drop the cleanup before resuming: the resume helper takes over the co ctx
+     * data slot that the cleanup reads op from */
+    ngx_http_ffi_client_clear_cleanup(op);
 
     if (rc != NGX_OK && msg != NULL) {
         ngx_http_ffi_client_set_op_err(op, msg);

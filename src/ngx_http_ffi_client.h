@@ -146,6 +146,10 @@ struct ngx_http_ffi_client_op_s {
     ngx_http_ffi_client_ffi_resp_t      *ffi_resp;
     ngx_peer_connection_t                peer;
     ngx_str_t                            peer_name;
+    ngx_resolver_ctx_t                  *resolve_ctx;
+    ngx_str_t                            resolve_name;
+    struct sockaddr_storage              sockaddr;
+    in_port_t                            port;
     ngx_http_ffi_client_state_e          state;
     ngx_buf_t                           *request;
     ngx_http_ffi_client_response_parser_t parser;
@@ -164,6 +168,9 @@ struct ngx_http_ffi_client_op_s {
     unsigned                             keepalive_counted:1;
     unsigned                             reused:1;
     unsigned                             received:1;
+    unsigned                             cleanup_set:1;
+    unsigned                             resolve_inline:1;
+    unsigned                             resolve_failed:1;
 #if (NGX_SSL)
     ngx_str_t                            ssl_server_name;
     ngx_str_t                            ssl_trusted_certificate;
@@ -192,9 +199,10 @@ ngx_int_t ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
     ngx_http_ffi_client_response_parser_t *parser,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
 
-ngx_int_t ngx_http_ffi_client_keepalive_get(ngx_http_request_t *r,
+ngx_int_t ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
     u_char *err, size_t *errlen);
+ngx_int_t ngx_http_ffi_client_keepalive_get(ngx_http_ffi_client_op_t *op);
 ngx_int_t ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op);
 void ngx_http_ffi_client_keepalive_close_active(ngx_http_ffi_client_op_t *op);
 
