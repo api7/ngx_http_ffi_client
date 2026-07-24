@@ -86,7 +86,7 @@ __DATA__
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -124,7 +124,7 @@ secure
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -168,14 +168,14 @@ GET /t
                 keepalive = { pool_size = 4, idle_timeout = 60000 },
             }
 
-            local r1, err = client.request(opts)
+            local r1, err = client.request_uri(opts)
             if not r1 then
                 ngx.status = 500
                 ngx.say(err)
                 return
             end
 
-            local r2, err2 = client.request(opts)
+            local r2, err2 = client.request_uri(opts)
             if not r2 then
                 ngx.status = 500
                 ngx.say(err2)
@@ -205,7 +205,7 @@ true
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -238,7 +238,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -277,7 +277,7 @@ secure
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -314,7 +314,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,
@@ -350,7 +350,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12399,

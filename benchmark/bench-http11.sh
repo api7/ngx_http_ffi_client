@@ -56,7 +56,7 @@ http {
         location /bench {
             content_by_lua_block {
                 local client = require "resty.ngx_http_ffi_client"
-                local res, err = client.request({
+                local res, err = client.request_uri({
                     scheme = "http", host = "127.0.0.1", port = $port,
                     method = "GET", path = "/mock",
                     keepalive = { pool = "bench", idle_timeout = 60000, pool_size = 128 },
@@ -74,8 +74,8 @@ http {
                     method = "GET", path = "/mock",
                     keepalive = { pool = "reuse", idle_timeout = 60000, pool_size = 2 },
                 }
-                local a = client.request(opts)
-                local b = client.request(opts)
+                local a = client.request_uri(opts)
+                local b = client.request_uri(opts)
                 ngx.say("first:"  .. tostring(a and a.reused))
                 ngx.say("second:" .. tostring(b and b.reused))
             }

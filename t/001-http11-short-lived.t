@@ -31,7 +31,7 @@ __DATA__
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = ngx.var.server_port,
@@ -79,7 +79,7 @@ hello
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = ngx.var.server_port,
@@ -121,7 +121,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = ngx.var.server_port,
@@ -159,7 +159,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = ngx.var.server_port,
@@ -191,7 +191,7 @@ chunked
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = 1,

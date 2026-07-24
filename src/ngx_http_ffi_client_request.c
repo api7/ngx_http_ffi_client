@@ -38,6 +38,13 @@ static ngx_int_t ngx_http_ffi_client_prepare_connection(
     ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op);
 static ngx_int_t ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_do_stream(ngx_http_ffi_client_op_t *op);
+static ngx_int_t ngx_http_ffi_client_next_chunk(ngx_http_ffi_client_op_t *op,
+    ngx_http_ffi_client_ffi_chunk_t *chunk, u_char *err, size_t *errlen);
+static void ngx_http_ffi_client_stateful_connected(
+    ngx_http_ffi_client_op_t *op);
+static void ngx_http_ffi_client_op_reset(ngx_http_ffi_client_op_t *op);
+static void ngx_http_ffi_client_op_pool_cleanup(void *data);
 static void ngx_http_ffi_client_cleanup(void *data);
 static void ngx_http_ffi_client_close(ngx_http_ffi_client_op_t *op);
 static void ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op,
@@ -226,6 +233,14 @@ ngx_http_ffi_client_connect(ngx_http_ffi_client_op_t *op)
             return ngx_http_ffi_client_set_op_err(op, "no memory");
         }
 
+        if (op->stateful) {
+            /* a pooled connection is live already: the object is connected
+             * without ever parking the coroutine */
+            op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+            op->connected = 1;
+            return NGX_OK;
+        }
+
         ngx_http_ffi_client_set_cleanup(op);
 
         op->state = NGX_HTTP_FFI_CLIENT_WRITING;
@@ -288,6 +303,16 @@ ngx_http_ffi_client_do_connect(ngx_http_ffi_client_op_t *op)
 #else
         op->state = NGX_HTTP_FFI_CLIENT_WRITING;
 #endif
+
+        if (op->stateful && op->state == NGX_HTTP_FFI_CLIENT_WRITING) {
+            /* nothing left to wait for: report the connection without parking
+             * the coroutine */
+            ngx_http_ffi_client_clear_cleanup(op);
+            op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+            op->connected = 1;
+            return NGX_OK;
+        }
+
         ngx_post_event(c->write, &ngx_posted_events);
         return NGX_AGAIN;
     }
@@ -774,6 +799,11 @@ ngx_http_ffi_client_write_handler(ngx_event_t *wev)
         return;
     }
 
+    /* a stateful connection the object owns but has parked nothing on */
+    if (op->stateful && op->pending == NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
+        return;
+    }
+
     if (wev->timedout) {
         ngx_http_ffi_client_finalize(op, NGX_ERROR,
             op->state == NGX_HTTP_FFI_CLIENT_CONNECTING
@@ -803,6 +833,12 @@ ngx_http_ffi_client_write_handler(ngx_event_t *wev)
         }
 #endif
 
+        /* a stateful connect has no request to send: hand the connection back */
+        if (op->pending == NGX_HTTP_FFI_CLIENT_PENDING_CONNECT) {
+            ngx_http_ffi_client_stateful_connected(op);
+            return;
+        }
+
         op->state = NGX_HTTP_FFI_CLIENT_WRITING;
     }
 
@@ -822,6 +858,11 @@ ngx_http_ffi_client_read_handler(ngx_event_t *rev)
     op = c->data;
 
     if (op == NULL || op->resumed) {
+        return;
+    }
+
+    /* a stateful connection the object owns but has parked nothing on */
+    if (op->stateful && op->pending == NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
         return;
     }
 
@@ -937,7 +978,11 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
     ssize_t           n;
     ngx_int_t         rc;
     ngx_connection_t *c;
-    u_char            buf[4096];
+    u_char            buf[NGX_HTTP_FFI_CLIENT_READ_BUF_SIZE];
+
+    if (op->stateful && !op->preread) {
+        return ngx_http_ffi_client_do_stream(op);
+    }
 
     c = op->peer.connection;
 
@@ -983,6 +1028,172 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
             ngx_http_ffi_client_finalize(op, NGX_ERROR,
                 "upstream closed before complete response");
             return NGX_ERROR;
+        }
+
+        if (!op->received) {
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+            return NGX_ERROR;
+        }
+
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to read response");
+        return NGX_ERROR;
+    }
+}
+
+
+/*
+ * Produce the next body slice out of what the parser has already been fed.
+ * NGX_OK when chunk was filled, NGX_AGAIN when the socket has to be read again,
+ * NGX_ERROR on a parse failure with err written.
+ */
+static ngx_int_t
+ngx_http_ffi_client_next_chunk(ngx_http_ffi_client_op_t *op,
+    ngx_http_ffi_client_ffi_chunk_t *chunk, u_char *err, size_t *errlen)
+{
+    ngx_str_t  span;
+
+    for ( ;; ) {
+        if (op->parser.chunk_ready) {
+            ngx_http_ffi_client_response_take_chunk(&op->parser, &span);
+
+            /* an empty slice is not an answer: keep going, an empty one only
+             * ever means EOF */
+            if (span.len == 0 && !op->parser.done) {
+                continue;
+            }
+
+            chunk->data = span.len ? span.data : (u_char *) "";
+            chunk->len = span.len;
+            chunk->eof = op->parser.done ? 1 : 0;
+
+            return NGX_OK;
+        }
+
+        if (op->parser.done) {
+            chunk->data = (u_char *) "";
+            chunk->len = 0;
+            chunk->eof = 1;
+
+            return NGX_OK;
+        }
+
+        if (ngx_http_ffi_client_response_pending(&op->parser) == 0) {
+            return NGX_AGAIN;
+        }
+
+        /* bytes are still sitting behind the last pause: parse them before
+         * going back to the socket */
+        if (ngx_http_ffi_client_response_parse(op->r->pool, &op->parser, NULL,
+                                               0, err, errlen)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+}
+
+
+/*
+ * Incremental reader for the stateful object: resume Lua once the headers are
+ * in, then hand the body out one parser span at a time. Everything already in
+ * the read buffer is parsed before the socket is touched again, and the loop
+ * keeps draining while the connection reports readable, so bytes buffered
+ * inside the TLS layer are never stranded.
+ */
+static ngx_int_t
+ngx_http_ffi_client_do_stream(ngx_http_ffi_client_op_t *op)
+{
+    ssize_t            n;
+    ngx_int_t          rc;
+    ngx_connection_t  *c;
+
+    c = op->peer.connection;
+
+    for ( ;; ) {
+
+        if (op->pending == NGX_HTTP_FFI_CLIENT_PENDING_REQUEST) {
+            if (op->parser.headers_done) {
+                op->errlen = sizeof(op->err);
+
+                if (ngx_http_ffi_client_response_headers_to_ffi(&op->parser,
+                        op->ffi_resp, op->err, &op->errlen)
+                    != NGX_OK)
+                {
+                    ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                    return NGX_ERROR;
+                }
+
+                op->ffi_resp->reused = op->reused;
+                ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
+                return NGX_OK;
+            }
+
+        } else {
+            op->errlen = sizeof(op->err);
+            rc = ngx_http_ffi_client_next_chunk(op, op->ffi_chunk, op->err,
+                                                &op->errlen);
+
+            if (rc == NGX_ERROR) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            if (rc == NGX_OK) {
+                ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
+                return NGX_OK;
+            }
+        }
+
+        if (ngx_http_ffi_client_response_pending(&op->parser)) {
+            op->errlen = sizeof(op->err);
+
+            if (ngx_http_ffi_client_response_parse(op->r->pool, &op->parser,
+                                                   NULL, 0, op->err,
+                                                   &op->errlen)
+                != NGX_OK)
+            {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            continue;
+        }
+
+        n = c->recv(c, op->rbuf, op->rbuf_size);
+
+        if (n > 0) {
+            op->received = 1;
+            op->errlen = sizeof(op->err);
+
+            if (ngx_http_ffi_client_response_parse(op->r->pool, &op->parser,
+                                                   op->rbuf, n, op->err,
+                                                   &op->errlen)
+                != NGX_OK)
+            {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            continue;
+        }
+
+        if (n == NGX_AGAIN) {
+            return ngx_http_ffi_client_handle_read_wait(op);
+        }
+
+        if (n == 0) {
+            /* a message framed by the connection close ends here */
+            op->errlen = sizeof(op->err);
+
+            if (ngx_http_ffi_client_response_eof(op->r->pool, &op->parser,
+                                                 op->err, &op->errlen)
+                != NGX_OK)
+            {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            continue;
         }
 
         if (!op->received) {
@@ -1337,6 +1548,12 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
     c->read->handler = ngx_http_ffi_client_read_handler;
     c->write->handler = ngx_http_ffi_client_write_handler;
 
+    /* a stateful connect ends at the handshake: there is no request yet */
+    if (op->pending == NGX_HTTP_FFI_CLIENT_PENDING_CONNECT) {
+        ngx_http_ffi_client_stateful_connected(op);
+        return;
+    }
+
     op->state = NGX_HTTP_FFI_CLIENT_WRITING;
 
     (void) ngx_http_ffi_client_do_write(op);
@@ -1367,6 +1584,29 @@ ngx_http_ffi_client_cleanup(void *data)
         op->resolve_ctx = NULL;
     }
 
+    if (op->stateful) {
+        op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+        op->conn_broken = 1;
+        op->connected = 0;
+    }
+
+    ngx_http_ffi_client_close(op);
+}
+
+
+/*
+ * Last resort for the stateful object: an idle connection it still owns when
+ * the request ends (the Lua code never called set_keepalive or close) would
+ * otherwise stay open until the worker exits.
+ */
+static void
+ngx_http_ffi_client_op_pool_cleanup(void *data)
+{
+    ngx_http_ffi_client_op_t  *op = data;
+
+    op->connected = 0;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+
     ngx_http_ffi_client_close(op);
 }
 
@@ -1382,7 +1622,8 @@ static void
 ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     const char *msg)
 {
-    lua_State *co;
+    lua_State        *co;
+    ngx_connection_t *c;
 
     if (op->resumed) {
         return;
@@ -1398,6 +1639,53 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
 
     if (rc != NGX_OK && msg != NULL) {
         ngx_http_ffi_client_set_op_err(op, msg);
+    }
+
+    /*
+     * The stateful object owns its connection across calls, so completion here
+     * only ends one call on it: success leaves the connection open for the next
+     * request (set_keepalive or close decides its fate later), failure closes it
+     * as broken.
+     */
+    if (op->stateful) {
+        op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+        op->ffi_resp = NULL;
+        op->ffi_chunk = NULL;
+
+        c = op->peer.connection;
+
+        if (c != NULL) {
+            if (c->read->timer_set) {
+                ngx_del_timer(c->read);
+            }
+
+            if (c->write->timer_set) {
+                ngx_del_timer(c->write);
+            }
+        }
+
+        co = ngx_http_lua_get_co_ctx_vm(op->coctx);
+
+        if (rc == NGX_OK) {
+            lua_pushboolean(co, 1);
+            ngx_http_lua_set_cur_co_ctx(op->r, op->coctx);
+            ngx_http_lua_co_ctx_resume_helper(op->coctx, 1);
+            return;
+        }
+
+        op->conn_broken = 1;
+        op->connected = 0;
+        ngx_http_ffi_client_close(op);
+
+        if (op->errlen == 0) {
+            ngx_http_ffi_client_set_op_err(op, "request failed");
+        }
+
+        lua_pushnil(co);
+        lua_pushlstring(co, (const char *) op->err, op->errlen);
+        ngx_http_lua_set_cur_co_ctx(op->r, op->coctx);
+        ngx_http_lua_co_ctx_resume_helper(op->coctx, 2);
+        return;
     }
 
     if (rc == NGX_OK
@@ -1428,4 +1716,534 @@ ngx_http_ffi_client_finalize(ngx_http_ffi_client_op_t *op, ngx_int_t rc,
     lua_pushlstring(co, (const char *) op->err, op->errlen);
     ngx_http_lua_set_cur_co_ctx(op->r, op->coctx);
     ngx_http_lua_co_ctx_resume_helper(op->coctx, 2);
+}
+
+
+/*
+ * Wipe everything that belongs to one connection, keeping what belongs to the
+ * Lua object: the request it was created on, its timeouts and its read buffer.
+ */
+static void
+ngx_http_ffi_client_op_reset(ngx_http_ffi_client_op_t *op)
+{
+    u_char              *rbuf;
+    size_t               rbuf_size;
+    ngx_msec_t           connect_timeout, send_timeout, read_timeout;
+    ngx_http_request_t  *r;
+
+    ngx_http_ffi_client_clear_cleanup(op);
+
+    /* a no-op unless a previous connect left something half-open */
+    ngx_http_ffi_client_close(op);
+
+    r = op->r;
+    rbuf = op->rbuf;
+    rbuf_size = op->rbuf_size;
+    connect_timeout = op->connect_timeout;
+    send_timeout = op->send_timeout;
+    read_timeout = op->read_timeout;
+
+    ngx_memzero(op, sizeof(ngx_http_ffi_client_op_t));
+
+    op->r = r;
+    op->stateful = 1;
+    op->rbuf = rbuf;
+    op->rbuf_size = rbuf_size;
+    op->connect_timeout = connect_timeout;
+    op->send_timeout = send_timeout;
+    op->read_timeout = read_timeout;
+}
+
+
+/* Resume a stateful connect: the connection is up, no request has been sent. */
+static void
+ngx_http_ffi_client_stateful_connected(ngx_http_ffi_client_op_t *op)
+{
+    lua_State  *co;
+
+    if (op->resumed) {
+        return;
+    }
+
+    op->resumed = 1;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+    op->connected = 1;
+    op->state = NGX_HTTP_FFI_CLIENT_DONE;
+
+    ngx_http_ffi_client_clear_cleanup(op);
+
+    co = ngx_http_lua_get_co_ctx_vm(op->coctx);
+    lua_pushboolean(co, 1);
+    ngx_http_lua_set_cur_co_ctx(op->r, op->coctx);
+    ngx_http_lua_co_ctx_resume_helper(op->coctx, 1);
+}
+
+
+ngx_http_ffi_client_op_t *
+ngx_http_ffi_client_ffi_new(ngx_http_request_t *r)
+{
+    ngx_pool_cleanup_t        *cln;
+    ngx_http_ffi_client_op_t  *op;
+
+    if (r == NULL) {
+        return NULL;
+    }
+
+    op = ngx_pcalloc(r->pool, sizeof(ngx_http_ffi_client_op_t));
+    if (op == NULL) {
+        return NULL;
+    }
+
+    cln = ngx_pool_cleanup_add(r->pool, 0);
+    if (cln == NULL) {
+        return NULL;
+    }
+
+    cln->handler = ngx_http_ffi_client_op_pool_cleanup;
+    cln->data = op;
+
+    op->r = r;
+    op->stateful = 1;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+    op->connect_timeout = 60000;
+    op->send_timeout = 60000;
+    op->read_timeout = 60000;
+
+    return op;
+}
+
+
+void
+ngx_http_ffi_client_ffi_set_timeouts(ngx_http_ffi_client_op_t *op,
+    ngx_msec_t connect_timeout, ngx_msec_t send_timeout,
+    ngx_msec_t read_timeout)
+{
+    if (op == NULL) {
+        return;
+    }
+
+    if (connect_timeout > 0) {
+        op->connect_timeout = connect_timeout;
+    }
+
+    if (send_timeout > 0) {
+        op->send_timeout = send_timeout;
+    }
+
+    if (read_timeout > 0) {
+        op->read_timeout = read_timeout;
+    }
+}
+
+
+/*
+ * Open (or take from the pool) the connection the object owns. Returns NGX_OK
+ * when it is usable right away, NGX_AGAIN once the coroutine has to wait for
+ * the connect or the TLS handshake, NGX_ERROR with err set.
+ */
+ngx_int_t
+ngx_http_ffi_client_ffi_connect(ngx_http_request_t *r,
+    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_connect_t *cp,
+    u_char *err, size_t *errlen)
+{
+    ngx_int_t                      rc;
+    ngx_uint_t                     is_https;
+    ngx_http_ffi_client_ffi_req_t  req;
+
+    if (op == NULL || cp == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "bad connect");
+    }
+
+    if (op->connected) {
+        return ngx_http_ffi_client_set_err(err, errlen, "already connected");
+    }
+
+    /* the object may be reconnected after set_keepalive or close, so nothing
+     * from the previous connection may leak into the new one */
+    ngx_http_ffi_client_op_reset(op);
+
+    is_https = cp->scheme.data != NULL
+               && cp->scheme.len == sizeof("https") - 1
+               && ngx_strncmp(cp->scheme.data, "https", sizeof("https") - 1)
+                  == 0;
+
+    if (cp->scheme.data == NULL
+        || !(is_https
+             || (cp->scheme.len == sizeof("http") - 1
+                 && ngx_strncmp(cp->scheme.data, "http",
+                                sizeof("http") - 1) == 0)))
+    {
+        return ngx_http_ffi_client_set_err(err, errlen, "unsupported scheme");
+    }
+
+    /* scheme and the ssl flag must agree: no plaintext on an https URL */
+    if ((is_https != 0) != (cp->ssl != 0)) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "scheme and ssl flag mismatch");
+    }
+
+    if (cp->port == 0 || cp->port > 65535) {
+        return ngx_http_ffi_client_set_err(err, errlen, "bad port");
+    }
+
+    if (cp->keepalive && cp->keepalive_pool_size == 0) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "bad keepalive pool size");
+    }
+
+    op->coctx = ngx_http_lua_get_cur_co_ctx(r);
+    if (op->coctx == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "no coroutine context found");
+    }
+
+    if (cp->ssl) {
+#if (NGX_SSL)
+        op->ssl = 1;
+        op->ssl_verify = cp->ssl_verify ? 1 : 0;
+
+        if (cp->ssl_server_name.len) {
+            if (cp->ssl_server_name.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid TLS server name");
+            }
+
+            op->ssl_server_name.len = cp->ssl_server_name.len;
+            op->ssl_server_name.data = ngx_pnalloc(r->pool,
+                                                   cp->ssl_server_name.len);
+            if (op->ssl_server_name.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+
+            ngx_memcpy(op->ssl_server_name.data, cp->ssl_server_name.data,
+                       cp->ssl_server_name.len);
+        }
+
+        if (cp->ssl_trusted_certificate.len) {
+            if (cp->ssl_trusted_certificate.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "invalid trusted certificate");
+            }
+
+            op->ssl_trusted_certificate.len = cp->ssl_trusted_certificate.len;
+            op->ssl_trusted_certificate.data =
+                ngx_pnalloc(r->pool, cp->ssl_trusted_certificate.len);
+            if (op->ssl_trusted_certificate.data == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+
+            ngx_memcpy(op->ssl_trusted_certificate.data,
+                       cp->ssl_trusted_certificate.data,
+                       cp->ssl_trusted_certificate.len);
+        }
+#else
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "TLS is not supported by this build");
+#endif
+    }
+
+    op->keepalive = cp->keepalive ? 1 : 0;
+    op->keepalive_idle_timeout = cp->keepalive_idle_timeout;
+    op->keepalive_pool_size = cp->keepalive_pool_size;
+
+    /* a one-shot request view of the connect params, so the host header, peer
+     * and keepalive-key helpers are shared verbatim with the one-shot path */
+    ngx_memzero(&req, sizeof(ngx_http_ffi_client_ffi_req_t));
+    req.scheme = cp->scheme;
+    req.host = cp->host;
+    req.port = cp->port;
+    req.keepalive = cp->keepalive;
+    req.keepalive_pool = cp->keepalive_pool;
+    req.keepalive_pool_size = cp->keepalive_pool_size;
+    req.keepalive_idle_timeout = cp->keepalive_idle_timeout;
+    req.ssl = cp->ssl;
+    req.ssl_verify = cp->ssl_verify;
+    req.ssl_server_name = cp->ssl_server_name;
+    req.ssl_trusted_certificate = cp->ssl_trusted_certificate;
+
+    if (ngx_http_ffi_client_build_host_header(r->pool, &req, &op->host_header,
+                                              err, errlen)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (ngx_http_ffi_client_parse_peer(r, &req, op, err, errlen) == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    if (op->keepalive
+        && ngx_http_ffi_client_keepalive_bind(r, op, &req, err, errlen)
+           != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    /* nothing past this point reads cp: the FFI struct belongs to Lua and the
+     * connect can outlive this call */
+
+    op->resumed = 0;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_CONNECT;
+
+    rc = ngx_http_ffi_client_connect(op);
+
+    if (rc == NGX_ERROR) {
+        op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+        return ngx_http_ffi_client_export_err(op, err, errlen);
+    }
+
+    return rc;
+}
+
+
+/*
+ * Send one request on the owned connection. Always returns NGX_AGAIN on
+ * success: the write is driven from the event loop, so the coroutine parks
+ * first and is resumed at the response headers (or, with preread_body, once the
+ * whole body has been read).
+ */
+ngx_int_t
+ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
+    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_reqp_t *rp,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
+{
+    ngx_connection_t              *c;
+    ngx_http_ffi_client_ffi_req_t  req;
+
+    if (op == NULL || rp == NULL || resp == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "bad request");
+    }
+
+    if (!op->connected || op->conn_broken || op->peer.connection == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "not connected");
+    }
+
+    if (op->pending != NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
+        return ngx_http_ffi_client_set_err(err, errlen, "busy");
+    }
+
+    /* sending again over an unread response would desync the connection */
+    if (op->request_sent && !op->parser.done) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "previous response is not fully read");
+    }
+
+    if (rp->headers_len != 0 && rp->headers == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid headers");
+    }
+
+    op->coctx = ngx_http_lua_get_cur_co_ctx(r);
+    if (op->coctx == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "no coroutine context found");
+    }
+
+    if (ngx_http_ffi_client_response_parser_init(r->pool, &op->parser)
+        != NGX_OK)
+    {
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    ngx_memzero(&req, sizeof(ngx_http_ffi_client_ffi_req_t));
+    req.method = rp->method;
+    req.path = rp->path;
+    req.headers = rp->headers;
+    req.headers_len = rp->headers_len;
+    req.body = rp->body;
+    /* the object owns the connection, so the wire always says keep-alive; when
+     * to give it up is set_keepalive's and close's call */
+    req.keepalive = 1;
+
+    if (ngx_http_ffi_client_build_request(r, &req, &op->request,
+                                          &op->host_header, err, errlen)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    op->preread = rp->preread_body ? 1 : 0;
+
+    if (!op->preread) {
+        if (op->rbuf == NULL) {
+            op->rbuf = ngx_pnalloc(r->pool,
+                                   NGX_HTTP_FFI_CLIENT_READ_BUF_SIZE);
+            if (op->rbuf == NULL) {
+                return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+            }
+
+            op->rbuf_size = NGX_HTTP_FFI_CLIENT_READ_BUF_SIZE;
+        }
+
+        ngx_http_ffi_client_response_stream(&op->parser);
+    }
+
+    op->ffi_resp = resp;
+    op->ffi_chunk = NULL;
+    op->body_offset = 0;
+    op->received = 0;
+    op->request_sent = 1;
+    op->resumed = 0;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_REQUEST;
+    op->state = NGX_HTTP_FFI_CLIENT_WRITING;
+
+    ngx_http_ffi_client_set_cleanup(op);
+
+    c = op->peer.connection;
+    ngx_post_event(c->write, &ngx_posted_events);
+
+    return NGX_AGAIN;
+}
+
+
+/*
+ * Pull the next body slice. Returns NGX_OK when the slice came straight out of
+ * what is already parsed (no yield), NGX_AGAIN once the coroutine has to wait
+ * for more bytes, NGX_ERROR with err set.
+ */
+ngx_int_t
+ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
+    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_chunk_t *chunk,
+    u_char *err, size_t *errlen)
+{
+    ngx_int_t  rc;
+
+    if (op == NULL || chunk == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "bad read");
+    }
+
+    if (op->pending != NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
+        return ngx_http_ffi_client_set_err(err, errlen, "busy");
+    }
+
+    if (op->preread) {
+        /* the buffered fast path already read the whole body: hand it out in
+         * one slice, then report EOF */
+        if (op->body_offset >= op->parser.body.len) {
+            chunk->data = (u_char *) "";
+            chunk->len = 0;
+            chunk->eof = 1;
+
+            return NGX_OK;
+        }
+
+        chunk->data = op->parser.body.data + op->body_offset;
+        chunk->len = op->parser.body.len - op->body_offset;
+        chunk->eof = 1;
+        op->body_offset += chunk->len;
+
+        return NGX_OK;
+    }
+
+    if (!op->request_sent) {
+        return ngx_http_ffi_client_set_err(err, errlen, "no response to read");
+    }
+
+    rc = ngx_http_ffi_client_next_chunk(op, chunk, err, errlen);
+
+    if (rc == NGX_ERROR) {
+        /* a malformed response leaves the stream out of sync */
+        op->conn_broken = 1;
+        return NGX_ERROR;
+    }
+
+    if (rc == NGX_OK) {
+        return NGX_OK;
+    }
+
+    if (op->conn_broken || !op->connected || op->peer.connection == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "connection closed");
+    }
+
+    op->coctx = ngx_http_lua_get_cur_co_ctx(r);
+    if (op->coctx == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "no coroutine context found");
+    }
+
+    op->ffi_chunk = chunk;
+    op->resumed = 0;
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_READ_BODY;
+    op->state = NGX_HTTP_FFI_CLIENT_READING;
+
+    ngx_http_ffi_client_set_cleanup(op);
+
+    ngx_post_event(op->peer.connection->read, &ngx_posted_events);
+
+    return NGX_AGAIN;
+}
+
+
+ngx_uint_t
+ngx_http_ffi_client_ffi_get_reused_times(ngx_http_ffi_client_op_t *op)
+{
+    return op == NULL ? 0 : op->reused;
+}
+
+
+/*
+ * Give the connection back to the pool. pool_size is accepted for
+ * lua-resty-http compatibility but the pool is sized when it is created, at
+ * connect time.
+ */
+ngx_int_t
+ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
+    ngx_http_ffi_client_op_t *op, ngx_msec_t idle_timeout,
+    ngx_uint_t pool_size, u_char *err, size_t *errlen)
+{
+    (void) r;
+    (void) pool_size;
+
+    if (op == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "bad handle");
+    }
+
+    if (op->pending != NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
+        return ngx_http_ffi_client_set_err(err, errlen, "busy");
+    }
+
+    /* an unread response leaves the connection out of sync with the peer, so it
+     * must not go back into the pool */
+    if (!op->connected || op->conn_broken || op->peer.connection == NULL
+        || op->keepalive_pool == NULL || op->parser.connection_close
+        || (op->request_sent && !op->parser.done))
+    {
+        ngx_http_ffi_client_ffi_close(op);
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "connection not reusable");
+    }
+
+    if (idle_timeout > 0) {
+        op->keepalive_idle_timeout = idle_timeout;
+    }
+
+    if (ngx_http_ffi_client_keepalive_save(op) != NGX_OK) {
+        ngx_http_ffi_client_ffi_close(op);
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "failed to set keepalive");
+    }
+
+    op->connected = 0;
+    op->request_sent = 0;
+    ngx_http_ffi_client_clear_cleanup(op);
+
+    return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_ffi_close(ngx_http_ffi_client_op_t *op)
+{
+    if (op == NULL) {
+        return;
+    }
+
+    op->pending = NGX_HTTP_FFI_CLIENT_PENDING_NONE;
+
+    ngx_http_ffi_client_close(op);
+
+    op->connected = 0;
+    op->conn_broken = 0;
+    op->request_sent = 0;
+
+    ngx_http_ffi_client_clear_cleanup(op);
 }

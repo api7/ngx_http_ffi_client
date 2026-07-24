@@ -10,8 +10,56 @@ The current implementation target is HTTP/1.x only:
 - Nonblocking execution inside OpenResty worker processes.
 - HTTP/1.1 over HTTP and HTTPS.
 - Keepalive connection pooling.
+- Buffered and incremental (streaming) response reads.
 - HTTP/1 parsing and framing through the vendored pure-C `llhttp` parser.
 - LuaJIT FFI bindings in `lib/resty/ngx_http_ffi_client.lua`.
+
+## Lua API
+
+Two entry points, both on `resty.ngx_http_ffi_client`.
+
+**`request_uri(opts)`** — one shot: connect, send, read the whole response,
+release the connection.
+
+```lua
+local client = require "resty.ngx_http_ffi_client"
+
+local res, err = client.request_uri({
+    scheme = "http", host = "127.0.0.1", port = 1984,
+    method = "GET", path = "/hello",
+    headers = { ["X-Trace"] = "1" },
+    keepalive = { pool_size = 30, idle_timeout = 60000 },
+})
+-- res.status / res.headers / res.body
+```
+
+**`new()`** — a stateful client object that owns its connection across calls,
+shaped like `lua-resty-http`:
+
+```lua
+local httpc = client.new()
+httpc:set_timeouts(2000, 2000, 2000)
+
+assert(httpc:connect({ scheme = "https", host = "example.com", port = 443 }))
+
+local res = assert(httpc:request({ method = "GET", path = "/events" }))
+-- res.status and res.headers are in; the body has not been read yet
+
+local reader = res.body_reader
+while true do
+    local chunk = reader()          -- one slice, as it arrives off the socket
+    if not chunk then break end
+    -- ...
+end
+-- or res:read_body() to get the whole body as a string
+
+httpc:set_keepalive()               -- back to the pool, or httpc:close()
+```
+
+`request{ preread_body = true }` selects the buffered fast path instead: C reads
+the whole body and resumes the coroutine once, with `res.body` ready. Use it for
+bounded bodies; a stream read with `body_reader` is the right call for SSE and
+very large responses.
 
 ## Project status
 
@@ -46,13 +94,14 @@ settled, but the full production behavior is still being built.
    response parser benchmarks at near parity with the hand-written C path (see
    [benchmark/llhttp-poc.md](benchmark/llhttp-poc.md)).
 
-4. **The next HTTP/1 work stays in this stack.** Streaming and incremental
-   response delivery, SSE / large bodies, chunked bodies, trailers, bodyless
-   responses (`204`/`304`/`HEAD`), connection-close framing, timeout and error
-   paths, and request-smuggling hardening are treated as HTTP/1 parsing and
-   framing work around `llhttp`. TLS certificate handling, SNI, and mTLS are
-   also future HTTP/1 client work in this same C/Nginx module, handled at the
-   transport layer rather than by changing the protocol scope.
+4. **The next HTTP/1 work stays in this stack.** Incremental response delivery
+   is in: the stateful object resumes at the headers and pulls the body one
+   `llhttp` span at a time, so SSE and large bodies stream. What is left —
+   trailers, bodyless responses (`204`/`304`/`HEAD`), connection-close framing,
+   timeout and error paths, and request-smuggling hardening — is treated as
+   HTTP/1 parsing and framing work around `llhttp`. mTLS is future client work
+   in this same C/Nginx module, handled at the transport layer rather than by
+   changing the protocol scope.
 
 5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
    should not shape the current HTTP/1 API. If they are added later, they will

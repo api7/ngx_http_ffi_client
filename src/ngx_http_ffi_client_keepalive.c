@@ -7,6 +7,7 @@ struct ngx_http_ffi_client_keepalive_item_s {
     ngx_connection_t                   *connection;
     struct sockaddr_storage             sockaddr;
     socklen_t                           socklen;
+    ngx_uint_t                          reused;
 };
 
 
@@ -120,7 +121,8 @@ ngx_http_ffi_client_keepalive_get(ngx_http_ffi_client_op_t *op)
         op->peer.cached = 1;
         op->peer.sockaddr = (struct sockaddr *) &item->sockaddr;
         op->peer.socklen = item->socklen;
-        op->reused = 1;
+        /* how many times this connection has been taken out of the pool */
+        op->reused = item->reused + 1;
         op->keepalive_counted = 1;
 
         return NGX_OK;
@@ -174,6 +176,7 @@ ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op)
 
     item->connection = c;
     item->socklen = op->peer.socklen;
+    item->reused = op->reused;
     ngx_memcpy(&item->sockaddr, op->peer.sockaddr, op->peer.socklen);
 
     ngx_queue_insert_head(&pool->cache, q);

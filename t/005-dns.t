@@ -128,7 +128,7 @@ __DATA__
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "test.local",
                 port = ngx.var.server_port,
@@ -176,7 +176,7 @@ hello
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "127.0.0.1",
                 port = ngx.var.server_port,
@@ -210,7 +210,7 @@ direct
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "missing.local",
                 port = ngx.var.server_port,
@@ -244,7 +244,7 @@ missing.local could not be resolved (3: Host not found)
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "slow.local",
                 port = ngx.var.server_port,
@@ -278,7 +278,7 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "test.local",
                 port = ngx.var.server_port,
@@ -328,14 +328,14 @@ no resolver defined to resolve "test.local"
                 keepalive = { pool_size = 4, idle_timeout = 60000 },
             }
 
-            local r1, err = client.request(opts)
+            local r1, err = client.request_uri(opts)
             if not r1 then
                 ngx.status = 500
                 ngx.say(err)
                 return
             end
 
-            local r2, err2 = client.request(opts)
+            local r2, err2 = client.request_uri(opts)
             if not r2 then
                 ngx.status = 500
                 ngx.say(err2)
@@ -367,7 +367,7 @@ true
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "https",
                 host = "test.local",
                 port = 12499,
@@ -427,7 +427,7 @@ secure
             -- the stub answers one query only, so the second request has to
             -- come out of the resolver cache
             for i = 1, 2 do
-                local res, err = client.request(opts)
+                local res, err = client.request_uri(opts)
                 if not res then
                     ngx.status = 500
                     ngx.say(err)
@@ -458,7 +458,7 @@ GET /t
 
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
-            local res, err = client.request({
+            local res, err = client.request_uri({
                 scheme = "http",
                 host = "slow.local",
                 port = ngx.var.server_port,
