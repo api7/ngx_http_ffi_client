@@ -39,7 +39,7 @@ __DATA__
                 },
             }
 
-            local first, err = client.request(opts)
+            local first, err = client.request_uri(opts)
             if not first then
                 ngx.status = 500
                 ngx.say(err)
@@ -47,7 +47,7 @@ __DATA__
             end
 
             local second
-            second, err = client.request(opts)
+            second, err = client.request_uri(opts)
             if not second then
                 ngx.status = 500
                 ngx.say(err)
@@ -98,7 +98,7 @@ second:true
                 },
             }
 
-            local first, err = client.request(opts)
+            local first, err = client.request_uri(opts)
             if not first then
                 ngx.status = 500
                 ngx.say(err)
@@ -108,7 +108,7 @@ second:true
             ngx.sleep(0.12)
 
             local second
-            second, err = client.request(opts)
+            second, err = client.request_uri(opts)
             if not second then
                 ngx.status = 500
                 ngx.say(err)
@@ -172,7 +172,7 @@ second:false
             local client = require "resty.ngx_http_ffi_client"
 
             local function request(path)
-                return client.request({
+                return client.request_uri({
                     scheme = "http",
                     host = "127.0.0.1",
                     port = ngx.var.server_port,
@@ -261,7 +261,7 @@ after_close:false
                 },
             }
 
-            local first, err = client.request(opts)
+            local first, err = client.request_uri(opts)
             if not first then
                 ngx.status = 500
                 ngx.say(err)
@@ -271,7 +271,7 @@ after_close:false
             ngx.sleep(0.12)
 
             local second
-            second, err = client.request(opts)
+            second, err = client.request_uri(opts)
             if not second then
                 ngx.status = 500
                 ngx.say(err)

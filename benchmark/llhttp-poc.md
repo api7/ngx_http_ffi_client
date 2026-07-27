@@ -108,16 +108,19 @@ keepalive reuse check reports `first:false second:true`.
 
 ## Current HTTP/1 work
 
-- Response body is still fully buffered before returning to Lua (no streaming);
-  SSE / very large bodies need an incremental/streaming FFI contract.
+- The one-shot `request_uri()` still buffers the whole response body before
+  returning to Lua. The stateful object (`new()` / `connect` / `request`) reads
+  incrementally: `request` resumes at the headers and `body_reader` pulls one
+  `llhttp` body span at a time, so SSE and very large bodies never sit in a
+  single buffer. `preread_body = true` opts back into the buffered fast path.
 - HEAD-response body suppression is not wired (llhttp cannot infer the request
   method from the response alone); GET/POST are covered.
-- More HTTP/1 edge cases still need production handling: chunked bodies,
-  trailers, bodyless responses (`204`/`304`/`HEAD`), connection-close framing,
-  timeout and error paths, and request-smuggling hardening.
-- TLS certificate handling, SNI, and mTLS are future HTTP/1 client work in this
-  module's transport layer, while HTTP/1 parsing and framing stay built around
-  llhttp.
+- More HTTP/1 edge cases still need production handling: trailers, bodyless
+  responses (`204`/`304`/`HEAD`), connection-close framing, timeout and error
+  paths, and request-smuggling hardening.
+- TLS (https, SNI, certificate verification, a trusted CA) now lives in this
+  module's transport layer; mTLS is still future work there, while HTTP/1
+  parsing and framing stay built around llhttp.
 
 ## Explicit non-goals
 

@@ -52,6 +52,11 @@ ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
         return NGX_OK;
     }
 
+    if (data == NULL) {
+        /* nothing is left unparsed: this parser consumes every byte it is fed */
+        len = 0;
+    }
+
     if (len > 0
         && ngx_http_ffi_client_response_append(pool, parser, data, len)
            != NGX_OK)
@@ -103,6 +108,78 @@ ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
     resp->body.len = parser->body.len;
 
     return NGX_OK;
+}
+
+
+/* status and headers only: the streaming path resumes Lua before the body */
+ngx_int_t
+ngx_http_ffi_client_response_headers_to_ffi(
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
+{
+    if (!parser->headers_done) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "response headers are incomplete");
+    }
+
+    resp->status = parser->status;
+    resp->headers = parser->headers.elts;
+    resp->headers_len = parser->headers.nelts;
+    resp->body.data = (u_char *) "";
+    resp->body.len = 0;
+
+    return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_response_stream(
+    ngx_http_ffi_client_response_parser_t *parser)
+{
+    parser->stream = 1;
+}
+
+
+ngx_uint_t
+ngx_http_ffi_client_response_pending(
+    ngx_http_ffi_client_response_parser_t *parser)
+{
+    /* every byte fed in is parsed on the spot, so nothing is ever held back */
+    (void) parser;
+
+    return 0;
+}
+
+
+void
+ngx_http_ffi_client_response_take_chunk(
+    ngx_http_ffi_client_response_parser_t *parser, ngx_str_t *chunk)
+{
+    *chunk = parser->chunk;
+
+    parser->taken += parser->chunk.len;
+    parser->chunk.data = NULL;
+    parser->chunk.len = 0;
+    parser->chunk_ready = 0;
+}
+
+
+/*
+ * The peer closed its side. This parser only accepts content-length framing, so
+ * a close before the announced length is always a truncated response.
+ */
+ngx_int_t
+ngx_http_ffi_client_response_eof(ngx_pool_t *pool,
+    ngx_http_ffi_client_response_parser_t *parser, u_char *err, size_t *errlen)
+{
+    (void) pool;
+
+    if (parser->done) {
+        return NGX_OK;
+    }
+
+    return ngx_http_ffi_client_set_err(err, errlen,
+        "upstream closed before complete response");
 }
 
 
@@ -420,6 +497,14 @@ ngx_http_ffi_client_response_update_body(
 
     parser->body.data = body_start;
     parser->body.len = body_len;
+
+    if (parser->stream && body_len > parser->taken) {
+        /* recomputed from taken every time, so a reallocated raw buffer never
+         * leaves the span dangling */
+        parser->chunk.data = body_start + parser->taken;
+        parser->chunk.len = body_len - parser->taken;
+        parser->chunk_ready = 1;
+    }
 
     if (body_len == (size_t) parser->content_length) {
         parser->done = 1;

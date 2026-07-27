@@ -84,7 +84,7 @@ jobs:
         run: |
           LUA_PATH="${TEST_NGINX_LUA_PACKAGE_PATH};;" \
             "$OPENRESTY_PREFIX/bin/resty" \
-            -e 'local client = require("resty.ngx_http_ffi_client"); assert(type(client.request) == "function")'
+            -e 'local client = require("resty.ngx_http_ffi_client"); assert(type(client.request_uri) == "function"); assert(type(client.new) == "function")'
 
       - name: Run integration tests
         env:
