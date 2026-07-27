@@ -712,13 +712,16 @@ function client.request(self, params)
     local path = params.path or "/"
 
     local query = params.query
-    if query then
+    if query ~= nil then
         if type(query) == "table" then
             query = ngx_encode_args(query)
+        elseif type(query) ~= "string" then
+            return nil, "query must be a string or table"
         end
 
         if query ~= "" then
-            path = path .. "?" .. query
+            local sep = path:find("?", 1, true) and "&" or "?"
+            path = path .. sep .. query
         end
     end
 

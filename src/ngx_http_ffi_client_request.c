@@ -2022,10 +2022,12 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "busy");
     }
 
-    /* sending again over an unread response would desync the connection */
-    if (op->request_sent && !op->parser.done) {
+    /* sending again over an unread response (or one that must close) would desync the connection */
+    if (op->request_sent && (!op->parser.done || op->parser.connection_close)) {
         return ngx_http_ffi_client_set_err(err, errlen,
-                                           "previous response is not fully read");
+                                           op->parser.connection_close
+                                               ? "connection is closing"
+                                               : "previous response is not fully read");
     }
 
     if (rp->headers_len != 0 && rp->headers == NULL) {
@@ -2142,7 +2144,7 @@ ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
 
     if (rc == NGX_ERROR) {
         /* a malformed response leaves the stream out of sync */
-        op->conn_broken = 1;
+        ngx_http_ffi_client_ffi_close(op);
         return NGX_ERROR;
     }
 
