@@ -11,6 +11,8 @@ static ngx_int_t ngx_http_ffi_client_set_err(u_char *err, size_t *errlen,
     const char *msg);
 static ngx_int_t ngx_http_ffi_client_set_op_err(ngx_http_ffi_client_op_t *op,
     const char *msg);
+static ngx_int_t ngx_http_ffi_client_set_op_errno(ngx_http_ffi_client_op_t *op,
+    ngx_err_t err, const char *fallback);
 static ngx_uint_t ngx_http_ffi_client_has_crlf(u_char *data, size_t len);
 static ngx_uint_t ngx_http_ffi_client_header_is_reserved(
     ngx_http_ffi_client_ffi_str_t *key);
@@ -285,7 +287,9 @@ ngx_http_ffi_client_do_connect(ngx_http_ffi_client_op_t *op)
     rc = ngx_event_connect_peer(&op->peer);
 
     if (rc == NGX_ERROR || rc == NGX_DECLINED) {
-        return ngx_http_ffi_client_set_op_err(op, "connect failed");
+        /* connect() failed outright, so its errno is still the last one set */
+        return ngx_http_ffi_client_set_op_errno(op, ngx_socket_errno,
+                                                "connect failed");
     }
 
     if (rc == NGX_BUSY) {
@@ -360,6 +364,30 @@ static ngx_int_t
 ngx_http_ffi_client_set_op_err(ngx_http_ffi_client_op_t *op, const char *msg)
 {
     op->errlen = ngx_snprintf(op->err, sizeof(op->err), "%s", msg) - op->err;
+    return NGX_ERROR;
+}
+
+
+/*
+ * Report a socket error by its errno text ("connection refused" and friends),
+ * which is what the cosocket hands to lua-resty-http callers. Falls back to
+ * `fallback` when there is no errno to name.
+ */
+static ngx_int_t
+ngx_http_ffi_client_set_op_errno(ngx_http_ffi_client_op_t *op, ngx_err_t err,
+    const char *fallback)
+{
+    u_char  *p;
+    u_char   errstr[NGX_MAX_ERROR_STR];
+
+    if (err == 0) {
+        return ngx_http_ffi_client_set_op_err(op, fallback);
+    }
+
+    p = ngx_strerror(err, errstr, sizeof(errstr));
+    op->errlen = ngx_snprintf(op->err, sizeof(op->err), "%*s", p - errstr,
+                              errstr) - op->err;
+
     return NGX_ERROR;
 }
 
@@ -912,10 +940,8 @@ static ngx_int_t
 ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
 {
     int               err;
-    u_char           *p;
     socklen_t         len;
     ngx_connection_t *c;
-    u_char            errstr[NGX_MAX_ERROR_STR];
 
     c = op->peer.connection;
     err = 0;
@@ -928,10 +954,7 @@ ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
     if (err) {
         (void) ngx_connection_error(c, err, "connect() failed");
 
-        p = ngx_strerror(err, errstr, sizeof(errstr));
-        op->errlen = ngx_snprintf(op->err, sizeof(op->err), "%*s",
-                                  p - errstr, errstr) - op->err;
-        return NGX_ERROR;
+        return ngx_http_ffi_client_set_op_errno(op, err, "connect failed");
     }
 
     return NGX_OK;
@@ -1088,7 +1111,15 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
         }
 
         if (!op->received) {
-            ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+            /*
+             * Nothing ever arrived, so it is the connect that failed, not the
+             * read. A refused peer wakes the read event first on Linux and
+             * lands here with SO_ERROR already consumed, so the errno the recv
+             * left behind is what names it.
+             */
+            (void) ngx_http_ffi_client_set_op_errno(op, ngx_socket_errno,
+                                                    "connect failed");
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
             return NGX_ERROR;
         }
 
@@ -1254,7 +1285,15 @@ ngx_http_ffi_client_do_stream(ngx_http_ffi_client_op_t *op)
         }
 
         if (!op->received) {
-            ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+            /*
+             * Nothing ever arrived, so it is the connect that failed, not the
+             * read. A refused peer wakes the read event first on Linux and
+             * lands here with SO_ERROR already consumed, so the errno the recv
+             * left behind is what names it.
+             */
+            (void) ngx_http_ffi_client_set_op_errno(op, ngx_socket_errno,
+                                                    "connect failed");
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
             return NGX_ERROR;
         }
 
