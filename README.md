@@ -30,7 +30,7 @@ local res, err = client.request_uri({
     headers = { ["X-Trace"] = "1" },
     keepalive = { pool_size = 30, idle_timeout = 60000 },
 })
--- res.status / res.headers / res.body
+-- res.status / res.headers / res.body / res.trailers
 ```
 
 **`new()`** — a stateful client object that owns its connection across calls,
@@ -96,14 +96,39 @@ settled, but the full production behavior is still being built.
 
 4. **The next HTTP/1 work stays in this stack.** Incremental response delivery
    is in: the stateful object resumes at the headers and pulls the body one
-   `llhttp` span at a time, so SSE and large bodies stream. Connection-close
-   framing ends a streamed response cleanly; the one-shot `request_uri()` still
-   treats a close mid-response as a truncated read. What is left — trailers,
-   bodyless responses (`204`/`304`/`HEAD`), close framing on the one-shot path,
-   the remaining timeout and error paths, and request-smuggling hardening — is
-   treated as HTTP/1 parsing and framing work around `llhttp`. mTLS is future
-   client work in this same C/Nginx module, handled at the transport layer
-   rather than by changing the protocol scope.
+   `llhttp` span at a time, so SSE and large bodies stream. Response framing is
+   in as well, on both the streaming and the one-shot path:
+
+   - `HEAD` responses, `204` and `304` are bodyless whatever `Content-Length`
+     they announce. `HEAD` is matched case-sensitively, as `lua-resty-http`
+     does.
+   - Chunked trailers are parsed but kept out of `res.headers`; they are
+     reported separately as `res.trailers`, filled once the body has been read
+     to the end.
+   - A response with neither `Content-Length` nor chunked encoding is framed by
+     the connection close, and that connection never goes back to the pool. A
+     close inside a declared `Content-Length` is still a truncated read.
+   - Every `llhttp_set_lenient_*` flag stays off. Strict mode is what rejects
+     the request-smuggling shapes: `Content-Length` together with
+     `Transfer-Encoding`, a conflicting repeated `Content-Length`, and a chunk
+     size that is not a plain hex number. The request side always frames with
+     `Content-Length`, so a caller-supplied `Transfer-Encoding` is dropped
+     rather than put on the wire next to it. One request gets one response: a
+     second message arriving behind the first is refused instead of merged into
+     it.
+   - Timeouts report `timeout` and a failed connect reports the socket error
+     (`connection refused` and the like), matching what the cosocket hands to
+     `lua-resty-http` callers.
+
+   The hand-written fallback accepts content-length and close framing and
+   rejects `Transfer-Encoding` outright, so the chunked and trailer cases in
+   `t/011-framing.t` run on the `llhttp` backend only.
+
+   What is left — interim `1xx` responses, repeated response headers, and
+   request token validation (#25) — is treated as HTTP/1 parsing and framing
+   work around `llhttp`. mTLS is future client work in this same C/Nginx
+   module, handled at the transport layer rather than by changing the protocol
+   scope.
 
 5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
    should not shape the current HTTP/1 API. If they are added later, they will

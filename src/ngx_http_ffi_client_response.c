@@ -36,7 +36,24 @@ ngx_http_ffi_client_response_parser_init(ngx_pool_t *pool,
         return NGX_ERROR;
     }
 
+    /* this backend rejects chunked responses, so a trailer can never reach it;
+     * the array exists to keep the two backends interchangeable */
+    if (ngx_array_init(&parser->trailers, pool, 1,
+                       sizeof(ngx_http_ffi_client_ffi_header_t))
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
     return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_response_head(
+    ngx_http_ffi_client_response_parser_t *parser)
+{
+    parser->head = 1;
 }
 
 
@@ -107,7 +124,19 @@ ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
     resp->body.data = parser->body.data;
     resp->body.len = parser->body.len;
 
+    ngx_http_ffi_client_response_trailers_to_ffi(parser, resp);
+
     return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_response_trailers_to_ffi(
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp)
+{
+    resp->trailers = parser->trailers.elts;
+    resp->trailers_len = parser->trailers.nelts;
 }
 
 
@@ -127,6 +156,10 @@ ngx_http_ffi_client_response_headers_to_ffi(
     resp->headers_len = parser->headers.nelts;
     resp->body.data = (u_char *) "";
     resp->body.len = 0;
+
+    /* trailers only exist once the body has been read to the end */
+    resp->trailers = NULL;
+    resp->trailers_len = 0;
 
     return NGX_OK;
 }
@@ -165,8 +198,8 @@ ngx_http_ffi_client_response_take_chunk(
 
 
 /*
- * The peer closed its side. This parser only accepts content-length framing, so
- * a close before the announced length is always a truncated response.
+ * The peer closed its side. A close-framed message ends here; with a declared
+ * content-length a close before that length is a truncated response.
  */
 ngx_int_t
 ngx_http_ffi_client_response_eof(ngx_pool_t *pool,
@@ -175,6 +208,11 @@ ngx_http_ffi_client_response_eof(ngx_pool_t *pool,
     (void) pool;
 
     if (parser->done) {
+        return NGX_OK;
+    }
+
+    if (parser->headers_done && parser->eof_framed) {
+        parser->done = 1;
         return NGX_OK;
     }
 
@@ -381,12 +419,19 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
             parser->content_length = content_length;
         }
 
-        if (ngx_http_ffi_client_str_eq_lc(&key, "Transfer-Encoding")
-            && ngx_http_ffi_client_contains_lc(&value, "chunked",
-                                               sizeof("chunked") - 1))
-        {
+        if (ngx_http_ffi_client_str_eq_lc(&key, "Transfer-Encoding")) {
+            if (ngx_http_ffi_client_contains_lc(&value, "chunked",
+                                                sizeof("chunked") - 1))
+            {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "chunked response is not supported");
+            }
+
+            /* any other coding leaves the framing undefined for this backend,
+             * and accepting it next to a content-length is how responses get
+             * smuggled */
             return ngx_http_ffi_client_set_err(err, errlen,
-                                               "chunked response is not supported");
+                                               "transfer-encoding is not supported");
         }
 
         if (ngx_http_ffi_client_str_eq_lc(&key, "Connection")) {
@@ -406,9 +451,25 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
         p = line_end + 1;
     }
 
+    /*
+     * A HEAD response and the bodyless status codes carry the header fields of
+     * a body they never send, so the content-length they announce must be
+     * ignored rather than waited for.
+     */
+    if (parser->head
+        || parser->status == 204
+        || parser->status == 304
+        || parser->status < 200)
+    {
+        parser->content_length = 0;
+        return NGX_OK;
+    }
+
     if (parser->content_length == -1) {
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "content-length is required");
+        /* no length and no chunked encoding: the body runs to the close */
+        parser->eof_framed = 1;
+        parser->connection_close = 1;
+        parser->content_length = NGX_MAX_OFF_T_VALUE;
     }
 
     return NGX_OK;
@@ -490,7 +551,7 @@ ngx_http_ffi_client_response_update_body(
     body_start = parser->raw->pos + parser->header_size;
     body_len = parser->raw->last - body_start;
 
-    if (body_len > (size_t) parser->content_length) {
+    if (!parser->eof_framed && body_len > (size_t) parser->content_length) {
         return ngx_http_ffi_client_set_err(err, errlen,
             "response body is larger than content-length");
     }
@@ -506,7 +567,8 @@ ngx_http_ffi_client_response_update_body(
         parser->chunk_ready = 1;
     }
 
-    if (body_len == (size_t) parser->content_length) {
+    /* a close-framed body has no announced end: only the close finishes it */
+    if (!parser->eof_framed && body_len == (size_t) parser->content_length) {
         parser->done = 1;
     }
 

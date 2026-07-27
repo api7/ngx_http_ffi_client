@@ -14,6 +14,8 @@ static ngx_int_t ngx_http_ffi_client_set_op_err(ngx_http_ffi_client_op_t *op,
 static ngx_uint_t ngx_http_ffi_client_has_crlf(u_char *data, size_t len);
 static ngx_uint_t ngx_http_ffi_client_header_is_reserved(
     ngx_http_ffi_client_ffi_str_t *key);
+static ngx_uint_t ngx_http_ffi_client_method_is_head(
+    ngx_http_ffi_client_ffi_str_t *method);
 static ngx_int_t ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
     ngx_http_ffi_client_ffi_req_t *req, ngx_str_t *host, u_char *err,
     size_t *errlen);
@@ -177,6 +179,10 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         != NGX_OK)
     {
         return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    if (ngx_http_ffi_client_method_is_head(&req->method)) {
+        ngx_http_ffi_client_response_head(&op->parser);
     }
 
     if (ngx_http_ffi_client_build_host_header(r->pool, req, &op->host_header,
@@ -383,7 +389,23 @@ ngx_http_ffi_client_header_is_reserved(ngx_http_ffi_client_ffi_str_t *key)
                                   key->len) == 0)
            || (key->len == sizeof("Content-Length") - 1
                && ngx_strncasecmp(key->data, (u_char *) "Content-Length",
+                                  key->len) == 0)
+           /* the request is always content-length framed; letting a caller add
+            * Transfer-Encoding would put both on the wire, which is the classic
+            * request-smuggling shape */
+           || (key->len == sizeof("Transfer-Encoding") - 1
+               && ngx_strncasecmp(key->data, (u_char *) "Transfer-Encoding",
                                   key->len) == 0);
+}
+
+
+/* HEAD is case-sensitive per RFC 9110, as it is in lua-resty-http */
+static ngx_uint_t
+ngx_http_ffi_client_method_is_head(ngx_http_ffi_client_ffi_str_t *method)
+{
+    return method->data != NULL
+           && method->len == sizeof("HEAD") - 1
+           && ngx_strncmp(method->data, "HEAD", sizeof("HEAD") - 1) == 0;
 }
 
 
@@ -804,10 +826,10 @@ ngx_http_ffi_client_write_handler(ngx_event_t *wev)
         return;
     }
 
+    /* "timeout" is what the cosocket reports, and what lua-resty-http callers
+     * (ai-transport among them) match on to answer 504 */
     if (wev->timedout) {
-        ngx_http_ffi_client_finalize(op, NGX_ERROR,
-            op->state == NGX_HTTP_FFI_CLIENT_CONNECTING
-            ? "connect timed out" : "send timed out");
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "timeout");
         return;
     }
 
@@ -817,8 +839,9 @@ ngx_http_ffi_client_write_handler(ngx_event_t *wev)
     }
 
     if (op->state == NGX_HTTP_FFI_CLIENT_CONNECTING) {
+        /* NULL keeps the errno text check_connect wrote */
         if (ngx_http_ffi_client_check_connect(op) != NGX_OK) {
-            ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+            ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
             return;
         }
 
@@ -867,7 +890,7 @@ ngx_http_ffi_client_read_handler(ngx_event_t *rev)
     }
 
     if (rev->timedout) {
-        ngx_http_ffi_client_finalize(op, NGX_ERROR, "read timed out");
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, "timeout");
         return;
     }
 
@@ -880,12 +903,19 @@ ngx_http_ffi_client_read_handler(ngx_event_t *rev)
 }
 
 
+/*
+ * Report the pending socket error, if any. The errno text is what the cosocket
+ * hands back ("connection refused" and friends), so callers keep the message
+ * this writes instead of a generic one.
+ */
 static ngx_int_t
 ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
 {
     int               err;
+    u_char           *p;
     socklen_t         len;
     ngx_connection_t *c;
+    u_char            errstr[NGX_MAX_ERROR_STR];
 
     c = op->peer.connection;
     err = 0;
@@ -897,6 +927,10 @@ ngx_http_ffi_client_check_connect(ngx_http_ffi_client_op_t *op)
 
     if (err) {
         (void) ngx_connection_error(c, err, "connect() failed");
+
+        p = ngx_strerror(err, errstr, sizeof(errstr));
+        op->errlen = ngx_snprintf(op->err, sizeof(op->err), "%*s",
+                                  p - errstr, errstr) - op->err;
         return NGX_ERROR;
     }
 
@@ -962,7 +996,7 @@ ngx_http_ffi_client_do_write(ngx_http_ffi_client_op_t *op)
     }
 
     if (ngx_http_ffi_client_check_connect(op) != NGX_OK) {
-        ngx_http_ffi_client_finalize(op, NGX_ERROR, "connect failed");
+        ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
         return NGX_ERROR;
     }
 
@@ -1025,9 +1059,32 @@ ngx_http_ffi_client_do_read(ngx_http_ffi_client_op_t *op)
         }
 
         if (n == 0) {
-            ngx_http_ffi_client_finalize(op, NGX_ERROR,
-                "upstream closed before complete response");
-            return NGX_ERROR;
+            /* a message framed by the connection close ends here; anything else
+             * is truncated and response_eof says so */
+            op->errlen = sizeof(op->err);
+
+            if (ngx_http_ffi_client_response_eof(op->r->pool, &op->parser,
+                                                 op->err, &op->errlen)
+                != NGX_OK)
+            {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            op->errlen = sizeof(op->err);
+            rc = ngx_http_ffi_client_response_to_ffi(op->r->pool, &op->parser,
+                                                     op->ffi_resp, op->err,
+                                                     &op->errlen);
+            if (rc != NGX_OK) {
+                ngx_http_ffi_client_finalize(op, NGX_ERROR, NULL);
+                return NGX_ERROR;
+            }
+
+            /* the peer is gone: this connection can never go back to the pool */
+            op->parser.connection_close = 1;
+            op->ffi_resp->reused = op->reused;
+            ngx_http_ffi_client_finalize(op, NGX_OK, NULL);
+            return NGX_OK;
         }
 
         if (!op->received) {
@@ -1505,7 +1562,7 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
     if (!c->ssl->handshaked) {
         ngx_http_ffi_client_finalize(op, NGX_ERROR,
             (c->read->timedout || c->write->timedout)
-            ? "TLS handshake timed out" : "TLS handshake failed");
+            ? "timeout" : "TLS handshake failed");
         return;
     }
 
@@ -2046,6 +2103,10 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "no memory");
     }
 
+    if (ngx_http_ffi_client_method_is_head(&rp->method)) {
+        ngx_http_ffi_client_response_head(&op->parser);
+    }
+
     ngx_memzero(&req, sizeof(ngx_http_ffi_client_ffi_req_t));
     req.method = rp->method;
     req.path = rp->path;
@@ -2172,6 +2233,29 @@ ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
     ngx_post_event(op->peer.connection->read, &ngx_posted_events);
 
     return NGX_AGAIN;
+}
+
+
+/*
+ * Trailers of the response just read. They only exist once the body has been
+ * consumed to the end, so Lua calls this after the reader reports EOF.
+ */
+void
+ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
+    ngx_http_ffi_client_ffi_resp_t *resp)
+{
+    if (op == NULL || resp == NULL) {
+        return;
+    }
+
+    resp->trailers = NULL;
+    resp->trailers_len = 0;
+
+    if (!op->parser.done) {
+        return;
+    }
+
+    ngx_http_ffi_client_response_trailers_to_ffi(&op->parser, resp);
 }
 
 

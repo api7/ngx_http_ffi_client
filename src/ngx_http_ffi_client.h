@@ -52,6 +52,8 @@ typedef struct {
     ngx_uint_t                       headers_len;
     ngx_http_ffi_client_ffi_str_t    body;
     ngx_uint_t                       reused;
+    ngx_http_ffi_client_ffi_header_t *trailers;
+    ngx_uint_t                       trailers_len;
 } ngx_http_ffi_client_ffi_resp_t;
 
 
@@ -119,6 +121,9 @@ typedef struct {
     llhttp_settings_t                settings;
     ngx_pool_t                      *pool;
     ngx_array_t                      headers;
+    /* headers that arrived after a chunked body, kept apart so they never show
+     * up as response headers */
+    ngx_array_t                      trailers;
     ngx_http_ffi_client_dbuf_t       field;
     ngx_http_ffi_client_dbuf_t       value;
     ngx_http_ffi_client_dbuf_t       body;
@@ -137,6 +142,8 @@ typedef struct {
     unsigned                         done:1;
     unsigned                         connection_close:1;
     unsigned                         error:1;
+    /* the request was a HEAD: the response is bodyless whatever it announces */
+    unsigned                         head:1;
 } ngx_http_ffi_client_response_parser_t;
 
 #else
@@ -144,6 +151,7 @@ typedef struct {
 typedef struct {
     ngx_uint_t                       status;
     ngx_array_t                      headers;
+    ngx_array_t                      trailers;
     off_t                            content_length;
     ngx_str_t                        body;
     ngx_buf_t                       *raw;
@@ -157,6 +165,9 @@ typedef struct {
     unsigned                         headers_done:1;
     unsigned                         done:1;
     unsigned                         connection_close:1;
+    unsigned                         head:1;
+    /* no content-length and no chunked encoding: the body ends at the close */
+    unsigned                         eof_framed:1;
 } ngx_http_ffi_client_response_parser_t;
 
 #endif
@@ -284,6 +295,17 @@ ngx_int_t ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
 ngx_int_t ngx_http_ffi_client_response_headers_to_ffi(
     ngx_http_ffi_client_response_parser_t *parser,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
+void ngx_http_ffi_client_response_trailers_to_ffi(
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp);
+
+/*
+ * Mark the response as the answer to a HEAD request. RFC 9110 gives such a
+ * response the header fields of a GET, including Content-Length, but no body,
+ * so the framing has to come from the request method rather than the headers.
+ */
+void ngx_http_ffi_client_response_head(
+    ngx_http_ffi_client_response_parser_t *parser);
 
 /*
  * Streaming reads. In streaming mode the parser hands body bytes out as spans
@@ -323,6 +345,8 @@ ngx_int_t ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
 ngx_int_t ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_chunk_t *chunk,
     u_char *err, size_t *errlen);
+void ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
+    ngx_http_ffi_client_ffi_resp_t *resp);
 ngx_int_t ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_msec_t idle_timeout,
     ngx_uint_t pool_size, u_char *err, size_t *errlen);
