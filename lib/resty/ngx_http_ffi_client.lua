@@ -166,15 +166,11 @@ local function set_str(dst, value)
 end
 
 
--- headers the client frames itself; a caller-supplied Transfer-Encoding next to
--- the Content-Length we always send is the classic request-smuggling shape
+-- Host, Connection and Content-Length reach C and feed the request prologue.
+-- Transfer-Encoding stays out: this client always frames the body with a
+-- Content-Length, and both on the wire is the request-smuggling shape (#29).
 local function forbidden_header(name)
-    name = string_lower(name)
-
-    return name == "host"
-           or name == "connection"
-           or name == "content-length"
-           or name == "transfer-encoding"
+    return string_lower(name) == "transfer-encoding"
 end
 
 

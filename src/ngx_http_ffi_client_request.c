@@ -21,9 +21,10 @@ static ngx_uint_t ngx_http_ffi_client_method_is_head(
 static ngx_int_t ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
     ngx_http_ffi_client_ffi_req_t *req, ngx_str_t *host, u_char *err,
     size_t *errlen);
+static ngx_uint_t ngx_http_ffi_client_connection_is_close(ngx_str_t *value);
 static ngx_int_t ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_buf_t **buf, ngx_str_t *host,
-    u_char *err, size_t *errlen);
+    ngx_uint_t *conn_close, u_char *err, size_t *errlen);
 static ngx_int_t ngx_http_ffi_client_parse_peer(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_http_ffi_client_op_t *op,
     u_char *err, size_t *errlen);
@@ -77,7 +78,7 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     u_char *err, size_t *errlen)
 {
     ngx_int_t                 rc;
-    ngx_uint_t                is_https;
+    ngx_uint_t                is_https, conn_close;
     ngx_http_ffi_client_op_t *op;
 
     if (req == NULL || resp == NULL) {
@@ -195,10 +196,17 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
     }
 
     if (ngx_http_ffi_client_build_request(r, req, &op->request,
-                                          &op->host_header, err, errlen)
+                                          &op->host_header, &conn_close, err,
+                                          errlen)
         != NGX_OK)
     {
         return NGX_ERROR;
+    }
+
+    if (conn_close) {
+        /* the request tells the peer this connection ends here, so it must not
+         * come from the pool or go back into it */
+        op->keepalive = 0;
     }
 
     if (ngx_http_ffi_client_parse_peer(r, req, op, err, errlen) == NGX_ERROR) {
@@ -407,23 +415,49 @@ ngx_http_ffi_client_has_crlf(u_char *data, size_t len)
 }
 
 
+#define ngx_http_ffi_client_header_eq(key, name)                              \
+    ((key)->len == sizeof(name) - 1                                           \
+     && ngx_strncasecmp((key)->data, (u_char *) name, sizeof(name) - 1) == 0)
+
+
+/*
+ * Headers the client writes itself, in the fixed prologue of every request. A
+ * caller may still set Host, Connection and Content-Length: their values feed
+ * that prologue instead of being emitted a second time.
+ */
 static ngx_uint_t
 ngx_http_ffi_client_header_is_reserved(ngx_http_ffi_client_ffi_str_t *key)
 {
-    return (key->len == sizeof("Host") - 1
-            && ngx_strncasecmp(key->data, (u_char *) "Host", key->len) == 0)
-           || (key->len == sizeof("Connection") - 1
-               && ngx_strncasecmp(key->data, (u_char *) "Connection",
-                                  key->len) == 0)
-           || (key->len == sizeof("Content-Length") - 1
-               && ngx_strncasecmp(key->data, (u_char *) "Content-Length",
-                                  key->len) == 0)
+    return ngx_http_ffi_client_header_eq(key, "Host")
+           || ngx_http_ffi_client_header_eq(key, "Connection")
+           || ngx_http_ffi_client_header_eq(key, "Content-Length")
            /* the request is always content-length framed; letting a caller add
             * Transfer-Encoding would put both on the wire, which is the classic
-            * request-smuggling shape */
-           || (key->len == sizeof("Transfer-Encoding") - 1
-               && ngx_strncasecmp(key->data, (u_char *) "Transfer-Encoding",
-                                  key->len) == 0);
+            * request-smuggling shape. Honoring it needs a streamed request
+            * body: api7/ngx_http_ffi_client#29 */
+           || ngx_http_ffi_client_header_eq(key, "Transfer-Encoding");
+}
+
+
+/* true when a Connection value asks for the connection to end */
+static ngx_uint_t
+ngx_http_ffi_client_connection_is_close(ngx_str_t *value)
+{
+    u_char  *p, *last;
+
+    if (value->len < sizeof("close") - 1) {
+        return 0;
+    }
+
+    last = value->data + value->len - (sizeof("close") - 1);
+
+    for (p = value->data; p <= last; p++) {
+        if (ngx_strncasecmp(p, (u_char *) "close", sizeof("close") - 1) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 
@@ -484,13 +518,21 @@ ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
 }
 
 
+/*
+ * Write the request. A caller may set Host, Connection and Content-Length, as
+ * in lua-resty-http: their values replace the ones this would derive, so the
+ * header is emitted once with what the caller asked for. conn_close reports
+ * whether the request tells the peer the connection ends after it.
+ */
 static ngx_int_t
 ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     ngx_http_ffi_client_ffi_req_t *req, ngx_buf_t **buf, ngx_str_t *host,
-    u_char *err, size_t *errlen)
+    ngx_uint_t *conn_close, u_char *err, size_t *errlen)
 {
+    off_t                             announced;
     size_t                            len;
     u_char                           *p;
+    ngx_str_t                         host_value, conn_value;
     ngx_uint_t                        i;
     ngx_http_ffi_client_ffi_header_t *h;
 
@@ -510,14 +552,16 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "invalid request");
     }
 
-    len = req->method.len + 1 + req->path.len
-          + sizeof(" HTTP/1.1" CRLF) - 1
-          + sizeof("Host: " CRLF) - 1 + host->len
-          + (req->keepalive ? sizeof("Connection: keep-alive" CRLF) - 1
-                            : sizeof("Connection: close" CRLF) - 1)
-          + sizeof("Content-Length: " CRLF) - 1 + NGX_SIZE_T_LEN
-          + sizeof(CRLF) - 1
-          + req->body.len;
+    host_value = *host;
+
+    if (req->keepalive) {
+        ngx_str_set(&conn_value, "keep-alive");
+
+    } else {
+        ngx_str_set(&conn_value, "close");
+    }
+
+    len = 0;
 
     for (i = 0; i < req->headers_len; i++) {
         h = &req->headers[i];
@@ -534,12 +578,47 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
                                                "invalid request header");
         }
 
+        if (ngx_http_ffi_client_header_eq(&h->key, "Host")) {
+            if (h->value.len) {
+                host_value.data = h->value.data;
+                host_value.len = h->value.len;
+            }
+
+        } else if (ngx_http_ffi_client_header_eq(&h->key, "Connection")) {
+            if (h->value.len) {
+                conn_value.data = h->value.data;
+                conn_value.len = h->value.len;
+            }
+
+        } else if (ngx_http_ffi_client_header_eq(&h->key, "Content-Length")) {
+            /* the body decides the framing: a length that disagrees with it
+             * would leave the connection out of sync with the peer */
+            announced = ngx_atoof(h->value.data, h->value.len);
+
+            if (announced == NGX_ERROR
+                || (size_t) announced != req->body.len)
+            {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                    "content-length does not match the body");
+            }
+        }
+
         if (ngx_http_ffi_client_header_is_reserved(&h->key)) {
             continue;
         }
 
         len += h->key.len + sizeof(": " CRLF) - 1 + h->value.len;
     }
+
+    *conn_close = ngx_http_ffi_client_connection_is_close(&conn_value);
+
+    len += req->method.len + 1 + req->path.len
+           + sizeof(" HTTP/1.1" CRLF) - 1
+           + sizeof("Host: " CRLF) - 1 + host_value.len
+           + sizeof("Connection: " CRLF) - 1 + conn_value.len
+           + sizeof("Content-Length: " CRLF) - 1 + NGX_SIZE_T_LEN
+           + sizeof(CRLF) - 1
+           + req->body.len;
 
     *buf = ngx_create_temp_buf(r->pool, len);
     if (*buf == NULL) {
@@ -552,16 +631,11 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     p = ngx_cpymem(p, req->path.data, req->path.len);
     p = ngx_cpymem(p, " HTTP/1.1" CRLF, sizeof(" HTTP/1.1" CRLF) - 1);
     p = ngx_cpymem(p, "Host: ", sizeof("Host: ") - 1);
-    p = ngx_cpymem(p, host->data, host->len);
+    p = ngx_cpymem(p, host_value.data, host_value.len);
     p = ngx_cpymem(p, CRLF, sizeof(CRLF) - 1);
-    if (req->keepalive) {
-        p = ngx_cpymem(p, "Connection: keep-alive" CRLF,
-                       sizeof("Connection: keep-alive" CRLF) - 1);
-
-    } else {
-        p = ngx_cpymem(p, "Connection: close" CRLF,
-                       sizeof("Connection: close" CRLF) - 1);
-    }
+    p = ngx_cpymem(p, "Connection: ", sizeof("Connection: ") - 1);
+    p = ngx_cpymem(p, conn_value.data, conn_value.len);
+    p = ngx_cpymem(p, CRLF, sizeof(CRLF) - 1);
     p = ngx_sprintf(p, "Content-Length: %uz" CRLF, req->body.len);
 
     for (i = 0; i < req->headers_len; i++) {
@@ -2103,6 +2177,7 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_reqp_t *rp,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen)
 {
+    ngx_uint_t                     conn_close;
     ngx_connection_t              *c;
     ngx_http_ffi_client_ffi_req_t  req;
 
@@ -2119,9 +2194,12 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
     }
 
     /* sending again over an unread response (or one that must close) would desync the connection */
-    if (op->request_sent && (!op->parser.done || op->parser.connection_close)) {
+    if (op->request_sent
+        && (!op->parser.done || op->parser.connection_close
+            || op->close_requested))
+    {
         return ngx_http_ffi_client_set_err(err, errlen,
-                                           op->parser.connection_close
+                                           op->parser.done
                                                ? "connection is closing"
                                                : "previous response is not fully read");
     }
@@ -2157,11 +2235,16 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
     req.keepalive = 1;
 
     if (ngx_http_ffi_client_build_request(r, &req, &op->request,
-                                          &op->host_header, err, errlen)
+                                          &op->host_header, &conn_close, err,
+                                          errlen)
         != NGX_OK)
     {
         return NGX_ERROR;
     }
+
+    /* a caller Connection: close makes this the last request on the object's
+     * connection, so it must not be pooled or reused afterwards */
+    op->close_requested = conn_close ? 1 : 0;
 
     op->preread = rp->preread_body ? 1 : 0;
 
@@ -2330,6 +2413,7 @@ ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
      * must not go back into the pool */
     if (!op->connected || op->conn_broken || op->peer.connection == NULL
         || op->keepalive_pool == NULL || op->parser.connection_close
+        || op->close_requested
         || (op->request_sent && !op->parser.done))
     {
         ngx_http_ffi_client_ffi_close(op);
@@ -2369,6 +2453,7 @@ ngx_http_ffi_client_ffi_close(ngx_http_ffi_client_op_t *op)
     op->connected = 0;
     op->conn_broken = 0;
     op->request_sent = 0;
+    op->close_requested = 0;
 
     ngx_http_ffi_client_clear_cleanup(op);
 }

@@ -265,6 +265,8 @@ struct ngx_http_ffi_client_op_s {
     unsigned                             connected:1;
     unsigned                             conn_broken:1;
     unsigned                             request_sent:1;
+    /* the request said Connection: close, so this connection ends with it */
+    unsigned                             close_requested:1;
 #if (NGX_SSL)
     ngx_str_t                            ssl_server_name;
     ngx_str_t                            ssl_trusted_certificate;

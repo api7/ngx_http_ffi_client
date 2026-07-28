@@ -120,6 +120,20 @@ settled, but the full production behavior is still being built.
      (`connection refused` and the like), matching what the cosocket hands to
      `lua-resty-http` callers.
 
+   The client writes `Host`, `Connection` and `Content-Length` itself, and a
+   caller may override them the way `lua-resty-http` allows. Their values feed
+   the request prologue, so each is emitted once:
+
+   - `Host` replaces the one derived from the peer, for virtual hosting and for
+     talking to an IP with a named `Host`.
+   - `Connection` goes on the wire as given. A value asking to close also keeps
+     that connection out of the pool, so the wire and the pool agree.
+   - `Content-Length` is accepted when it matches the body and refused when it
+     disagrees. `lua-resty-http` sends a mismatched length as given; here that
+     would leave the connection out of sync with the peer, so it is an error.
+   - `Transfer-Encoding` is still dropped, since honoring it needs a streamed
+     request body (#29).
+
    The hand-written fallback accepts content-length and close framing and
    rejects `Transfer-Encoding` outright, so the chunked and trailer cases in
    `t/011-framing.t` run on the `llhttp` backend only.
