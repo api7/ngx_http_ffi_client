@@ -458,9 +458,9 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
      */
     if (parser->head
         || parser->status == 204
+        || parser->status == 205
         || parser->status == 304
         || parser->status < 200)
-    {
         parser->content_length = 0;
         return NGX_OK;
     }
