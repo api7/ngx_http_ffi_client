@@ -439,25 +439,52 @@ ngx_http_ffi_client_header_is_reserved(ngx_http_ffi_client_ffi_str_t *key)
 }
 
 
-/* true when a Connection value asks for the connection to end */
-static ngx_uint_t
-ngx_http_ffi_client_connection_is_close(ngx_str_t *value)
+/*
+ * True when a comma-separated list header carries `token`. Whole tokens are
+ * compared, so a Connection of "disclose" is a different token and leaves the
+ * connection alone.
+ */
+ngx_uint_t
+ngx_http_ffi_client_has_token(ngx_str_t *value, const char *token, size_t len)
 {
-    u_char  *p, *last;
+    u_char  *p, *start, *last, *end;
 
-    if (value->len < sizeof("close") - 1) {
-        return 0;
-    }
+    p = value->data;
+    end = value->data + value->len;
 
-    last = value->data + value->len - (sizeof("close") - 1);
+    while (p < end) {
+        while (p < end && (*p == ',' || *p == ' ' || *p == '\t')) {
+            p++;
+        }
 
-    for (p = value->data; p <= last; p++) {
-        if (ngx_strncasecmp(p, (u_char *) "close", sizeof("close") - 1) == 0) {
+        start = p;
+
+        while (p < end && *p != ',') {
+            p++;
+        }
+
+        last = p;
+
+        while (last > start && (last[-1] == ' ' || last[-1] == '\t')) {
+            last--;
+        }
+
+        if ((size_t) (last - start) == len
+            && ngx_strncasecmp(start, (u_char *) token, len) == 0)
+        {
             return 1;
         }
     }
 
     return 0;
+}
+
+
+/* true when a Connection value asks for the connection to end */
+static ngx_uint_t
+ngx_http_ffi_client_connection_is_close(ngx_str_t *value)
+{
+    return ngx_http_ffi_client_has_token(value, "close", sizeof("close") - 1);
 }
 
 

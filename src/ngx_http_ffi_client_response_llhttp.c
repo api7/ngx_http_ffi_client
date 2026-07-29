@@ -421,7 +421,20 @@ ngx_http_ffi_client_on_headers_complete(llhttp_t *p)
     parser->status = llhttp_get_status_code(p);
     parser->headers_done = 1;
 
-    /* 1 tells llhttp the message has no body. 1xx, 204 and 304 are bodyless by
+    /*
+     * llhttp completes a 1xx as a message of its own, so the final response
+     * would be left on a connection the pool still considers reusable and the
+     * next request would read it as its own. Refuse until interim responses are
+     * consumed properly: api7/ngx_http_ffi_client#25.
+     */
+    if (parser->status < 200) {
+        parser->error = 1;
+        (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                           "interim response is not supported");
+        return -1;
+    }
+
+    /* 1 tells llhttp the message has no body. 204 and 304 are bodyless by
      * status and llhttp already knows it; a HEAD response is only bodyless
      * because of the request method, which the parser cannot see. */
     if (parser->head) {

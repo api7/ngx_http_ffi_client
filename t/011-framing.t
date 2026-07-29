@@ -520,7 +520,54 @@ GET /t
 
 
 
-=== TEST 15: a refused connect reports the socket error
+=== TEST 15: an interim response arriving in its own read is refused
+--- http_config eval: $::HttpConfig
+--- config
+    location = /interim {
+        content_by_lua_block {
+            ngx.req.read_body()
+            local sock = assert(ngx.req.socket(true))
+
+            -- the sleep splits the two messages across separate reads, which
+            -- is what lets an accepted 1xx strand the final response
+            sock:send("HTTP/1.1 100 Continue\r\n\r\n")
+            ngx.sleep(0.1)
+            pcall(sock.send, sock,
+                  "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfinal")
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+
+            -- twice: a pooled connection would hand the stranded final
+            -- response to the second request as if it were its own
+            for i = 1, 2 do
+                local res, err = client.request_uri({
+                    host = "127.0.0.1",
+                    port = ngx.var.server_port,
+                    path = "/interim",
+                    keepalive = { pool_size = 4 },
+                    timeout = 1000,
+                })
+
+                ngx.say(res and ("unexpected " .. res.status .. " " .. res.body)
+                            or err)
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+interim response is not supported
+interim response is not supported
+--- no_error_log
+[alert]
+
+
+
+=== TEST 16: a refused connect reports the socket error
 --- http_config eval: $::HttpConfig
 --- config
     location /t {

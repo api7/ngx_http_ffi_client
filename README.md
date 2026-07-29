@@ -138,11 +138,13 @@ settled, but the full production behavior is still being built.
    rejects `Transfer-Encoding` outright, so the chunked and trailer cases in
    `t/011-framing.t` run on the `llhttp` backend only.
 
-   What is left — interim `1xx` responses, repeated response headers, and
-   request token validation (#25) — is treated as HTTP/1 parsing and framing
-   work around `llhttp`. mTLS is future client work in this same C/Nginx
-   module, handled at the transport layer rather than by changing the protocol
-   scope.
+   An interim `1xx` response is refused for now. Completing it would hand the
+   `1xx` back as the answer and leave the final response on a connection the
+   pool still considers reusable, where the next request would read it as its
+   own. Consuming interim responses properly is #25, which also covers repeated
+   response headers and request token validation. mTLS is future client work in
+   this same C/Nginx module, handled at the transport layer rather than by
+   changing the protocol scope.
 
 5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
    should not shape the current HTTP/1 API. If they are added later, they will

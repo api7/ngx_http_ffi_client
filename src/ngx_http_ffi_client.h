@@ -325,6 +325,10 @@ ngx_int_t ngx_http_ffi_client_response_eof(ngx_pool_t *pool,
     ngx_http_ffi_client_response_parser_t *parser, u_char *err,
     size_t *errlen);
 
+/* whole-token lookup in a comma-separated list header such as Connection */
+ngx_uint_t ngx_http_ffi_client_has_token(ngx_str_t *value, const char *token,
+    size_t len);
+
 ngx_int_t ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
     u_char *err, size_t *errlen);

@@ -14,8 +14,6 @@ static ngx_int_t ngx_http_ffi_client_parse_content_length(ngx_str_t *value,
     off_t *out);
 static ngx_uint_t ngx_http_ffi_client_str_eq_lc(ngx_str_t *s,
     const char *name);
-static ngx_uint_t ngx_http_ffi_client_contains_lc(ngx_str_t *s,
-    const char *needle, size_t needle_len);
 static ngx_int_t ngx_http_ffi_client_response_update_body(
     ngx_http_ffi_client_response_parser_t *parser, u_char *err,
     size_t *errlen);
@@ -420,8 +418,8 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
         }
 
         if (ngx_http_ffi_client_str_eq_lc(&key, "Transfer-Encoding")) {
-            if (ngx_http_ffi_client_contains_lc(&value, "chunked",
-                                                sizeof("chunked") - 1))
+            if (ngx_http_ffi_client_has_token(&value, "chunked",
+                                              sizeof("chunked") - 1))
             {
                 return ngx_http_ffi_client_set_err(err, errlen,
                                                    "chunked response is not supported");
@@ -435,14 +433,15 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
         }
 
         if (ngx_http_ffi_client_str_eq_lc(&key, "Connection")) {
-            if (ngx_http_ffi_client_contains_lc(&value, "close",
-                                                sizeof("close") - 1))
+            /* whole tokens only: "disclose" carries no close token, and a
+             * substring match on "keep-alive" could clear a real close */
+            if (ngx_http_ffi_client_has_token(&value, "close",
+                                              sizeof("close") - 1))
             {
                 parser->connection_close = 1;
-            }
 
-            if (ngx_http_ffi_client_contains_lc(&value, "keep-alive",
-                                                sizeof("keep-alive") - 1))
+            } else if (ngx_http_ffi_client_has_token(&value, "keep-alive",
+                                                     sizeof("keep-alive") - 1))
             {
                 parser->connection_close = 0;
             }
@@ -456,11 +455,20 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
      * a body they never send, so the content-length they announce must be
      * ignored rather than waited for.
      */
-    if (parser->head
-        || parser->status == 204
-        || parser->status == 205
-        || parser->status == 304
-        || parser->status < 200)
+    if (parser->status < 200) {
+        /*
+         * An interim response is followed by the real one on the same
+         * connection. Completing it here would hand the 1xx back as the answer
+         * and leave the final response sitting on a connection the pool still
+         * considers reusable, where the next request would read it as its own.
+         * Refuse until interim responses are consumed properly:
+         * api7/ngx_http_ffi_client#25.
+         */
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "interim response is not supported");
+    }
+
+    if (parser->head || parser->status == 204 || parser->status == 304) {
         parser->content_length = 0;
         return NGX_OK;
     }
@@ -517,27 +525,6 @@ ngx_http_ffi_client_str_eq_lc(ngx_str_t *s, const char *name)
            && ngx_strncasecmp(s->data, (u_char *) name, len) == 0;
 }
 
-
-static ngx_uint_t
-ngx_http_ffi_client_contains_lc(ngx_str_t *s, const char *needle,
-    size_t needle_len)
-{
-    u_char  *p, *last;
-
-    if (s->len < needle_len) {
-        return 0;
-    }
-
-    last = s->data + s->len - needle_len;
-
-    for (p = s->data; p <= last; p++) {
-        if (ngx_strncasecmp(p, (u_char *) needle, needle_len) == 0) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
 
 
 static ngx_int_t
