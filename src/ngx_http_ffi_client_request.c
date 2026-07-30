@@ -2409,7 +2409,8 @@ ngx_http_ffi_client_ffi_get_reused_times(ngx_http_ffi_client_op_t *op)
  * Give the connection back to the pool. idle_timeout is how long it may sit
  * there, with 0 meaning it never expires. pool_size sizes the pool when this
  * call is the one that creates it; a pool that already exists keeps the size it
- * was created with. Lua resolves both defaults.
+ * was created with. Lua resolves the defaults it exposes, and a pool_size of 0
+ * from any other caller falls back to NGX_HTTP_FFI_CLIENT_KEEPALIVE_POOL_SIZE.
  */
 ngx_int_t
 ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,

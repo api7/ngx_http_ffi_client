@@ -242,8 +242,9 @@ struct ngx_http_ffi_client_op_s {
     ngx_msec_t                           read_timeout;
     ngx_str_t                            host_header;
     ngx_str_t                            keepalive_key;
-    /* NULL until the pool for keepalive_key exists; it may only be created
-     * when a connection is parked, so the size the caller expresses then wins */
+    /* NULL until the pool for keepalive_key exists. It is created as soon as a
+     * caller gives a size, at connect time or when the connection is parked;
+     * whichever size arrives first is the one the pool keeps. */
     ngx_http_ffi_client_keepalive_pool_t *keepalive_pool;
     ngx_msec_t                           keepalive_idle_timeout;
     /* size to create the pool with; 0 until a caller asks for one */

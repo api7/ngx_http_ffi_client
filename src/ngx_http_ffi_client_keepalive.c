@@ -74,8 +74,8 @@ ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
                                            "keepalive is unavailable");
     }
 
-    /* the key lives in r->pool; the pool copies it into the cycle pool, and
-     * that always happens while this request is still alive */
+    /* the key lives in r->pool; a pool created from it copies it into the cycle
+     * pool, and every creation path runs while this request is still alive */
     op->keepalive_key = key;
     op->keepalive_idle_timeout = req->keepalive_idle_timeout;
     op->keepalive_pool_size = req->keepalive_pool_size;
