@@ -67,6 +67,8 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         uintptr_t headers_len;
         ngx_http_ffi_client_ffi_str_t body;
         uintptr_t reused;
+        ngx_http_ffi_client_ffi_header_t *trailers;
+        uintptr_t trailers_len;
     } ngx_http_ffi_client_ffi_resp_t;
 
     int ngx_http_ffi_client_ffi_request(ngx_http_request_t *r,
@@ -123,6 +125,8 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
     int ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
         ngx_http_ffi_client_op_t *op, uintptr_t idle_timeout,
         uintptr_t pool_size, unsigned char *err, size_t *errlen);
+    void ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
+        ngx_http_ffi_client_ffi_resp_t *resp);
     uintptr_t ngx_http_ffi_client_ffi_get_reused_times(
         ngx_http_ffi_client_op_t *op);
     void ngx_http_ffi_client_ffi_close(ngx_http_ffi_client_op_t *op);
@@ -162,12 +166,11 @@ local function set_str(dst, value)
 end
 
 
+-- Host, Connection and Content-Length reach C and feed the request prologue.
+-- Transfer-Encoding stays out: this client always frames the body with a
+-- Content-Length, and both on the wire is the request-smuggling shape (#29).
 local function forbidden_header(name)
-    name = string_lower(name)
-
-    return name == "host"
-           or name == "connection"
-           or name == "content-length"
+    return string_lower(name) == "transfer-encoding"
 end
 
 
@@ -209,16 +212,20 @@ local function build_headers(headers)
 end
 
 
-local function response_table(resp)
-    local headers = {}
+local function header_table(arr, count)
+    local out = {}
 
-    for i = 0, tonumber(resp.headers_len) - 1 do
-        local header = resp.headers[i]
-        local key = ffi_str(header.key.data, header.key.len)
-        local value = ffi_str(header.value.data, header.value.len)
-        headers[key] = value
+    for i = 0, tonumber(count) - 1 do
+        local header = arr[i]
+        out[ffi_str(header.key.data, header.key.len)] =
+            ffi_str(header.value.data, header.value.len)
     end
 
+    return out
+end
+
+
+local function response_table(resp)
     local body = ""
     if resp.body.data ~= nil and resp.body.len > 0 then
         body = ffi_str(resp.body.data, resp.body.len)
@@ -226,7 +233,8 @@ local function response_table(resp)
 
     return {
         status = tonumber(resp.status),
-        headers = headers,
+        headers = header_table(resp.headers, resp.headers_len),
+        trailers = header_table(resp.trailers, resp.trailers_len),
         body = body,
         reused = resp.reused ~= 0,
     }
@@ -406,7 +414,7 @@ local res_mt
 
 local c_loaded
 local c_new, c_set_timeouts, c_connect, c_send, c_read, c_keepalive
-local c_reused, c_close
+local c_reused, c_close, c_trailers
 
 
 local function load_stateful()
@@ -423,6 +431,7 @@ local function load_stateful()
         c_keepalive = C.ngx_http_ffi_client_ffi_set_keepalive
         c_reused = C.ngx_http_ffi_client_ffi_get_reused_times
         c_close = C.ngx_http_ffi_client_ffi_close
+        c_trailers = C.ngx_http_ffi_client_ffi_get_trailers
     end)
 
     if not ok then
@@ -629,7 +638,7 @@ local function read_chunk(self)
 end
 
 
-local function make_body_reader(res)
+local function make_body_reader(res, resp)
     local self = res._httpc
     local done = false
 
@@ -647,6 +656,10 @@ local function make_body_reader(res)
 
         if eof then
             done = true
+            -- trailers arrive behind the last chunk, so they are only readable
+            -- now that the body is fully consumed
+            c_trailers(self._op, resp)
+            res.trailers = header_table(resp.trailers, resp.trailers_len)
         end
 
         return chunk
@@ -771,20 +784,14 @@ function client.request(self, params)
         return nil, "unexpected ffi return code: " .. tonumber(rc)
     end
 
-    local headers = {}
-    for i = 0, tonumber(resp.headers_len) - 1 do
-        local h = resp.headers[i]
-        headers[ffi_str(h.key.data, h.key.len)] =
-            ffi_str(h.value.data, h.value.len)
-    end
-
     if self._chunk == nil then
         self._chunk = chunk_t()
     end
 
     local res = setmetatable({
         status = tonumber(resp.status),
-        headers = headers,
+        headers = header_table(resp.headers, resp.headers_len),
+        trailers = {},
         _httpc = self,
     }, res_mt)
 
@@ -792,9 +799,10 @@ function client.request(self, params)
         -- the fast path already read the whole body in that single resume
         res.body = resp.body.len > 0
                    and ffi_str(resp.body.data, resp.body.len) or ""
+        res.trailers = header_table(resp.trailers, resp.trailers_len)
     end
 
-    res.body_reader = make_body_reader(res)
+    res.body_reader = make_body_reader(res, resp)
 
     return res
 end

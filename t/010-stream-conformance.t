@@ -10,8 +10,8 @@
 #     TEST 3 instead.
 #   - TEST 6 / 7 / 8 / 10 exercise the request-side (client body) reader, which
 #     this module does not expose.
-#   - TEST 9 issues a HEAD request. HEAD-response body suppression is not wired
-#     (llhttp cannot infer the request method from the response alone).
+#   - TEST 9 issues a HEAD request. Bodyless framing is covered in
+#     t/011-framing.t, which drives the exact response bytes.
 #
 # Every case here runs on the llhttp backend only: they are framed by chunked
 # encoding or by the connection close, and the hand-written fallback parser

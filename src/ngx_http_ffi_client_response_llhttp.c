@@ -19,6 +19,7 @@ static int ngx_http_ffi_client_on_headers_complete(llhttp_t *p);
 static int ngx_http_ffi_client_on_body(llhttp_t *p, const char *at,
     size_t len);
 static int ngx_http_ffi_client_on_message_complete(llhttp_t *p);
+static int ngx_http_ffi_client_on_reset(llhttp_t *p);
 
 
 ngx_int_t
@@ -28,6 +29,13 @@ ngx_http_ffi_client_response_parser_init(ngx_pool_t *pool,
     ngx_memzero(parser, sizeof(ngx_http_ffi_client_response_parser_t));
 
     if (ngx_array_init(&parser->headers, pool, 8,
+                       sizeof(ngx_http_ffi_client_ffi_header_t))
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (ngx_array_init(&parser->trailers, pool, 2,
                        sizeof(ngx_http_ffi_client_ffi_header_t))
         != NGX_OK)
     {
@@ -45,12 +53,29 @@ ngx_http_ffi_client_response_parser_init(ngx_pool_t *pool,
     parser->settings.on_body = ngx_http_ffi_client_on_body;
     parser->settings.on_message_complete =
         ngx_http_ffi_client_on_message_complete;
+    parser->settings.on_reset = ngx_http_ffi_client_on_reset;
 
     llhttp_init(&parser->parser, HTTP_RESPONSE, &parser->settings);
     parser->parser.data = parser;
     parser->pool = pool;
 
+    /*
+     * Every llhttp_set_lenient_* flag stays off on purpose. Strict mode is what
+     * rejects the request-smuggling shapes: Content-Length together with
+     * Transfer-Encoding, a repeated but conflicting Content-Length, a chunk size
+     * that is not a plain hex number, and data arriving after a close-framed
+     * message.
+     */
+
     return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_response_head(
+    ngx_http_ffi_client_response_parser_t *parser)
+{
+    parser->head = 1;
 }
 
 
@@ -196,7 +221,19 @@ ngx_http_ffi_client_response_to_ffi(ngx_pool_t *pool,
     resp->body.data = parser->body.len ? parser->body.data : (u_char *) "";
     resp->body.len = parser->body.len;
 
+    ngx_http_ffi_client_response_trailers_to_ffi(parser, resp);
+
     return NGX_OK;
+}
+
+
+void
+ngx_http_ffi_client_response_trailers_to_ffi(
+    ngx_http_ffi_client_response_parser_t *parser,
+    ngx_http_ffi_client_ffi_resp_t *resp)
+{
+    resp->trailers = parser->trailers.elts;
+    resp->trailers_len = parser->trailers.nelts;
 }
 
 
@@ -216,6 +253,10 @@ ngx_http_ffi_client_response_headers_to_ffi(
     resp->headers_len = parser->headers.nelts;
     resp->body.data = (u_char *) "";
     resp->body.len = 0;
+
+    /* trailers only exist once the body has been read to the end */
+    resp->trailers = NULL;
+    resp->trailers_len = 0;
 
     return NGX_OK;
 }
@@ -320,7 +361,10 @@ ngx_http_ffi_client_on_header_value_complete(llhttp_t *p)
 
     parser = ngx_http_ffi_client_llhttp_parser(p);
 
-    h = ngx_array_push(&parser->headers);
+    /* llhttp reports trailers through the same pair of callbacks, so anything
+     * arriving after the header block is a trailer */
+    h = ngx_array_push(parser->headers_done ? &parser->trailers
+                                            : &parser->headers);
     if (h == NULL) {
         goto failed;
     }
@@ -377,6 +421,26 @@ ngx_http_ffi_client_on_headers_complete(llhttp_t *p)
     parser->status = llhttp_get_status_code(p);
     parser->headers_done = 1;
 
+    /*
+     * llhttp completes a 1xx as a message of its own, so the final response
+     * would be left on a connection the pool still considers reusable and the
+     * next request would read it as its own. Refuse until interim responses are
+     * consumed properly: api7/ngx_http_ffi_client#25.
+     */
+    if (parser->status < 200) {
+        parser->error = 1;
+        (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                           "interim response is not supported");
+        return -1;
+    }
+
+    /* 1 tells llhttp the message has no body. 204 and 304 are bodyless by
+     * status and llhttp already knows it; a HEAD response is only bodyless
+     * because of the request method, which the parser cannot see. */
+    if (parser->head) {
+        return 1;
+    }
+
     return 0;
 }
 
@@ -429,4 +493,25 @@ ngx_http_ffi_client_on_message_complete(llhttp_t *p)
     parser->connection_close = llhttp_should_keep_alive(p) ? 0 : 1;
 
     return 0;
+}
+
+
+/*
+ * llhttp only resets to start another message once one has completed. A single
+ * request gets a single response, so a second one arriving behind the first is
+ * response smuggling, not something to parse: without this the two messages
+ * merge into one and the caller is handed a mix of both. Interim 1xx responses
+ * land here too and are refused for now; consuming them properly is #25.
+ */
+static int
+ngx_http_ffi_client_on_reset(llhttp_t *p)
+{
+    ngx_http_ffi_client_response_parser_t *parser;
+
+    parser = ngx_http_ffi_client_llhttp_parser(p);
+
+    parser->error = 1;
+    (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                       "unexpected second response");
+    return -1;
 }
