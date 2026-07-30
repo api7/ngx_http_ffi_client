@@ -34,9 +34,10 @@ static ngx_http_ffi_client_keepalive_pool_t *
     ngx_http_ffi_client_keepalive_lookup_node(ngx_rbtree_node_t *node,
     ngx_rbtree_node_t *sentinel, ngx_rbtree_key_t hash, ngx_str_t *key);
 static ngx_http_ffi_client_keepalive_pool_t *
-    ngx_http_ffi_client_keepalive_get_pool(ngx_http_request_t *r,
-    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
-    u_char *err, size_t *errlen);
+    ngx_http_ffi_client_keepalive_create(
+    ngx_http_ffi_client_main_conf_t *fmcf, ngx_str_t *key, ngx_uint_t size);
+static ngx_http_ffi_client_keepalive_pool_t *
+    ngx_http_ffi_client_keepalive_op_pool(ngx_http_ffi_client_op_t *op);
 static ngx_uint_t ngx_http_ffi_client_keepalive_match(
     ngx_http_ffi_client_keepalive_item_t *item, ngx_peer_connection_t *peer);
 static ngx_uint_t ngx_http_ffi_client_keepalive_bad_connection(
@@ -50,18 +51,57 @@ static void ngx_http_ffi_client_keepalive_read_handler(ngx_event_t *ev);
 static ngx_int_t ngx_http_ffi_client_keepalive_close_handler(ngx_event_t *ev);
 
 
-/* Bind the op to its pool. Runs before the peer address is known, so it only
- * needs the request parameters that make up the pool key. */
+/* Bind the op to its pool key. Runs before the peer address is known, so it
+ * only needs the request parameters that make up the key. */
 ngx_int_t
 ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
     u_char *err, size_t *errlen)
 {
-    if (ngx_http_ffi_client_keepalive_get_pool(r, op, req, err, errlen)
-        == NULL)
+    ngx_str_t                             key;
+    ngx_http_ffi_client_main_conf_t      *fmcf;
+    ngx_http_ffi_client_keepalive_pool_t *pool;
+
+    if (ngx_http_ffi_client_keepalive_build_key(r, req, &key, err, errlen)
+        != NGX_OK)
     {
         return NGX_ERROR;
     }
+
+    fmcf = ngx_http_get_module_main_conf(r, ngx_http_ffi_client_module);
+    if (fmcf == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen,
+                                           "keepalive is unavailable");
+    }
+
+    /* the key lives in r->pool; the pool copies it into the cycle pool, and
+     * that always happens while this request is still alive */
+    op->keepalive_key = key;
+    op->keepalive_idle_timeout = req->keepalive_idle_timeout;
+    op->keepalive_pool_size = req->keepalive_pool_size;
+
+    pool = ngx_http_ffi_client_keepalive_lookup(fmcf, &key);
+    if (pool != NULL) {
+        op->keepalive_pool = pool;
+        return NGX_OK;
+    }
+
+    /*
+     * No pool for this key yet. A caller-given size creates it now; without one
+     * it waits for the size expressed when a connection is parked, the way the
+     * cosocket creates its pool at setkeepalive time.
+     */
+    if (req->keepalive_pool_size == 0) {
+        return NGX_OK;
+    }
+
+    pool = ngx_http_ffi_client_keepalive_create(fmcf, &key,
+                                                req->keepalive_pool_size);
+    if (pool == NULL) {
+        return ngx_http_ffi_client_set_err(err, errlen, "no memory");
+    }
+
+    op->keepalive_pool = pool;
 
     return NGX_OK;
 }
@@ -140,10 +180,8 @@ ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op)
     ngx_http_ffi_client_keepalive_item_t *item;
     ngx_http_ffi_client_keepalive_pool_t *pool;
 
-    pool = op->keepalive_pool;
     c = op->peer.connection;
-
-    if (pool == NULL || c == NULL) {
+    if (c == NULL) {
         return NGX_ERROR;
     }
 
@@ -151,6 +189,13 @@ ngx_http_ffi_client_keepalive_save(ngx_http_ffi_client_op_t *op)
         || ngx_http_ffi_client_keepalive_bad_connection(c)
         || ngx_handle_read_event(c->read, 0) != NGX_OK)
     {
+        return NGX_ERROR;
+    }
+
+    /* creating the pool is the last step before parking, so a connection that
+     * turns out unusable leaves no empty pool behind */
+    pool = ngx_http_ffi_client_keepalive_op_pool(op);
+    if (pool == NULL) {
         return NGX_ERROR;
     }
 
@@ -366,58 +411,33 @@ ngx_http_ffi_client_keepalive_lookup_node(ngx_rbtree_node_t *node,
 }
 
 
+/* A pool is sized once, when it is created, and keeps that size for the life of
+ * the worker. */
 static ngx_http_ffi_client_keepalive_pool_t *
-ngx_http_ffi_client_keepalive_get_pool(ngx_http_request_t *r,
-    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,
-    u_char *err, size_t *errlen)
+ngx_http_ffi_client_keepalive_create(ngx_http_ffi_client_main_conf_t *fmcf,
+    ngx_str_t *key, ngx_uint_t size)
 {
-    size_t                                i;
-    ngx_str_t                             key;
-    ngx_http_ffi_client_main_conf_t      *fmcf;
+    ngx_uint_t                            i;
     ngx_http_ffi_client_keepalive_pool_t *pool;
-
-    if (ngx_http_ffi_client_keepalive_build_key(r, req, &key, err, errlen)
-        != NGX_OK)
-    {
-        return NULL;
-    }
-
-    fmcf = ngx_http_get_module_main_conf(r, ngx_http_ffi_client_module);
-    if (fmcf == NULL) {
-        ngx_http_ffi_client_set_err(err, errlen, "keepalive is unavailable");
-        return NULL;
-    }
-
-    pool = ngx_http_ffi_client_keepalive_lookup(fmcf, &key);
-    if (pool != NULL) {
-        op->keepalive_key = pool->key;
-        op->keepalive_pool = pool;
-        op->keepalive_idle_timeout = req->keepalive_idle_timeout;
-        op->keepalive_pool_size = pool->size;
-        return pool;
-    }
 
     pool = ngx_pcalloc(ngx_cycle->pool,
                        sizeof(ngx_http_ffi_client_keepalive_pool_t));
     if (pool == NULL) {
-        ngx_http_ffi_client_set_err(err, errlen, "no memory");
         return NULL;
     }
 
-    pool->key.len = key.len;
-    pool->key.data = ngx_pnalloc(ngx_cycle->pool, key.len);
+    pool->key.len = key->len;
+    pool->key.data = ngx_pnalloc(ngx_cycle->pool, key->len);
     if (pool->key.data == NULL) {
-        ngx_http_ffi_client_set_err(err, errlen, "no memory");
         return NULL;
     }
 
-    ngx_memcpy(pool->key.data, key.data, key.len);
+    ngx_memcpy(pool->key.data, key->data, key->len);
 
-    pool->size = req->keepalive_pool_size;
+    pool->size = size;
     pool->items = ngx_pcalloc(ngx_cycle->pool,
         sizeof(ngx_http_ffi_client_keepalive_item_t) * pool->size);
     if (pool->items == NULL) {
-        ngx_http_ffi_client_set_err(err, errlen, "no memory");
         return NULL;
     }
 
@@ -432,10 +452,51 @@ ngx_http_ffi_client_keepalive_get_pool(ngx_http_request_t *r,
     pool->node.key = ngx_crc32_short(pool->key.data, pool->key.len);
     ngx_rbtree_insert(&fmcf->pools, &pool->node);
 
-    op->keepalive_key = pool->key;
+    return pool;
+}
+
+
+/*
+ * The pool this op parks its connection in, created on the spot when the key
+ * has none yet. That is where a deferred pool_size takes effect; an existing
+ * pool keeps the size it was created with.
+ */
+static ngx_http_ffi_client_keepalive_pool_t *
+ngx_http_ffi_client_keepalive_op_pool(ngx_http_ffi_client_op_t *op)
+{
+    ngx_uint_t                            size;
+    ngx_http_ffi_client_main_conf_t      *fmcf;
+    ngx_http_ffi_client_keepalive_pool_t *pool;
+
+    if (op->keepalive_pool != NULL) {
+        return op->keepalive_pool;
+    }
+
+    if (op->keepalive_key.len == 0 || op->r == NULL) {
+        return NULL;
+    }
+
+    fmcf = ngx_http_get_module_main_conf(op->r, ngx_http_ffi_client_module);
+    if (fmcf == NULL) {
+        return NULL;
+    }
+
+    /* another op may have created it since this one bound to the key */
+    pool = ngx_http_ffi_client_keepalive_lookup(fmcf, &op->keepalive_key);
+
+    if (pool == NULL) {
+        size = op->keepalive_pool_size != 0
+               ? op->keepalive_pool_size
+               : NGX_HTTP_FFI_CLIENT_KEEPALIVE_POOL_SIZE;
+
+        pool = ngx_http_ffi_client_keepalive_create(fmcf, &op->keepalive_key,
+                                                    size);
+        if (pool == NULL) {
+            return NULL;
+        }
+    }
+
     op->keepalive_pool = pool;
-    op->keepalive_idle_timeout = req->keepalive_idle_timeout;
-    op->keepalive_pool_size = pool->size;
 
     return pool;
 }

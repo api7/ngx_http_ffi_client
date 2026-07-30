@@ -113,11 +113,6 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "invalid headers");
     }
 
-    if (req->keepalive && req->keepalive_pool_size == 0) {
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "bad keepalive pool size");
-    }
-
     op = ngx_pcalloc(r->pool, sizeof(ngx_http_ffi_client_op_t));
     if (op == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "no memory");
@@ -2083,11 +2078,6 @@ ngx_http_ffi_client_ffi_connect(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "bad port");
     }
 
-    if (cp->keepalive && cp->keepalive_pool_size == 0) {
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "bad keepalive pool size");
-    }
-
     op->coctx = ngx_http_lua_get_cur_co_ctx(r);
     if (op->coctx == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen,
@@ -2416,9 +2406,10 @@ ngx_http_ffi_client_ffi_get_reused_times(ngx_http_ffi_client_op_t *op)
 
 
 /*
- * Give the connection back to the pool. pool_size is accepted for
- * lua-resty-http compatibility but the pool is sized when it is created, at
- * connect time.
+ * Give the connection back to the pool. idle_timeout is how long it may sit
+ * there, with 0 meaning it never expires. pool_size sizes the pool when this
+ * call is the one that creates it; a pool that already exists keeps the size it
+ * was created with. Lua resolves both defaults.
  */
 ngx_int_t
 ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
@@ -2426,7 +2417,6 @@ ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
     ngx_uint_t pool_size, u_char *err, size_t *errlen)
 {
     (void) r;
-    (void) pool_size;
 
     if (op == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "bad handle");
@@ -2439,7 +2429,8 @@ ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
     /* an unread response leaves the connection out of sync with the peer, so it
      * must not go back into the pool */
     if (!op->connected || op->conn_broken || op->peer.connection == NULL
-        || op->keepalive_pool == NULL || op->parser.connection_close
+        || !op->keepalive || op->keepalive_key.len == 0
+        || op->parser.connection_close
         || op->close_requested
         || (op->request_sent && !op->parser.done))
     {
@@ -2448,8 +2439,10 @@ ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
                                            "connection not reusable");
     }
 
-    if (idle_timeout > 0) {
-        op->keepalive_idle_timeout = idle_timeout;
+    op->keepalive_idle_timeout = idle_timeout;
+
+    if (pool_size > 0) {
+        op->keepalive_pool_size = pool_size;
     }
 
     if (ngx_http_ffi_client_keepalive_save(op) != NGX_OK) {

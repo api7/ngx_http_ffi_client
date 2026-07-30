@@ -9,6 +9,8 @@
 #define NGX_HTTP_FFI_CLIENT_VERSION "0.0.1"
 #define NGX_HTTP_FFI_CLIENT_ERR_BUF_SIZE 256
 #define NGX_HTTP_FFI_CLIENT_READ_BUF_SIZE 4096
+/* fallback size for a pool no caller sized */
+#define NGX_HTTP_FFI_CLIENT_KEEPALIVE_POOL_SIZE 30
 
 
 typedef struct {
@@ -240,8 +242,11 @@ struct ngx_http_ffi_client_op_s {
     ngx_msec_t                           read_timeout;
     ngx_str_t                            host_header;
     ngx_str_t                            keepalive_key;
+    /* NULL until the pool for keepalive_key exists; it may only be created
+     * when a connection is parked, so the size the caller expresses then wins */
     ngx_http_ffi_client_keepalive_pool_t *keepalive_pool;
     ngx_msec_t                           keepalive_idle_timeout;
+    /* size to create the pool with; 0 until a caller asks for one */
     ngx_uint_t                           keepalive_pool_size;
     ngx_uint_t                           reused;
     u_char                               err[NGX_HTTP_FFI_CLIENT_ERR_BUF_SIZE];
