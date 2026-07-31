@@ -61,6 +61,26 @@ the whole body and resumes the coroutine once, with `res.body` ready. Use it for
 bounded bodies; a stream read with `body_reader` is the right call for SSE and
 very large responses.
 
+### Keepalive
+
+`set_keepalive(timeout, pool_size)` follows the cosocket contract that
+`lua-resty-http` forwards to.
+
+- `timeout` is how many milliseconds the connection may sit idle in the pool. It
+  defaults to `60000`, the cosocket's `lua_socket_keepalive_timeout`, and `0`
+  asks for a connection that never expires on its own.
+- `pool_size` sizes the pool. A pool is sized once, when it is created, and
+  keeps that size for the life of the worker: the first `pool_size` to reach a
+  given pool name wins and later ones are ignored, as with the cosocket. The
+  pool is created by whichever comes first, a `connect{ pool_size = ... }` or
+  the `set_keepalive` that parks the first connection in it. `connect` without a
+  `pool_size` leaves the sizing to `set_keepalive`, which falls back to `30`.
+- A full pool makes room by closing its least recently used connection.
+
+The one-shot `request_uri{ keepalive = { pool, pool_size, idle_timeout } }`
+resolves the same defaults and shares the same pools, so a pool name reaches the
+same connections from either entry point.
+
 ## Project status
 
 This project is at an **early implementation stage**. The protocol direction is

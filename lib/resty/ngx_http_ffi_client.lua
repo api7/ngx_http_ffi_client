@@ -143,6 +143,8 @@ local chunk_t = ffi.typeof("ngx_http_ffi_client_ffi_chunk_t")
 local ERR_BUF_SIZE = 256
 local DEFAULT_TIMEOUT = 60000
 local DEFAULT_POOL_SIZE = 30
+-- what the cosocket uses for lua_socket_keepalive_timeout; 0 means never expire
+local DEFAULT_IDLE_TIMEOUT = 60000
 local ffi_request
 
 
@@ -310,12 +312,12 @@ function _M.request_uri(opts)
         end
 
         keepalive_idle_timeout =
-            tonumber(keepalive.idle_timeout or 60000)
+            tonumber(keepalive.idle_timeout or DEFAULT_IDLE_TIMEOUT)
         if not keepalive_idle_timeout or keepalive_idle_timeout < 0 then
             return nil, "bad keepalive.idle_timeout"
         end
 
-        keepalive_pool_size = tonumber(keepalive.pool_size or 30)
+        keepalive_pool_size = tonumber(keepalive.pool_size or DEFAULT_POOL_SIZE)
         if not keepalive_pool_size or keepalive_pool_size < 1 then
             return nil, "bad keepalive.pool_size"
         end
@@ -546,9 +548,16 @@ function client.connect(self, opts, port_arg)
         return nil, "pool must be a string"
     end
 
-    pool_size = tonumber(pool_size or DEFAULT_POOL_SIZE)
-    if not pool_size or pool_size < 1 then
-        return nil, "bad pool_size"
+    if pool_size == nil then
+        -- nothing to size a pool with yet: set_keepalive gets to say how big it
+        -- is, the way the cosocket creates its pool at setkeepalive time
+        pool_size = 0
+
+    else
+        pool_size = tonumber(pool_size)
+        if not pool_size or pool_size < 1 then
+            return nil, "bad pool_size"
+        end
     end
 
     if self._op == nil then
@@ -817,9 +826,32 @@ function client.get_reused_times(self)
 end
 
 
+-- set_keepalive(timeout, pool_size): park the connection in its pool for
+-- timeout ms, 60s by default and forever when timeout is 0. pool_size sizes the
+-- pool if this is the call that creates it; an existing pool keeps its size.
 function client.set_keepalive(self, timeout, pool_size)
     if self._op == nil then
         return nil, "not connected"
+    end
+
+    if timeout == nil then
+        timeout = DEFAULT_IDLE_TIMEOUT
+
+    else
+        timeout = tonumber(timeout)
+        if not timeout or timeout < 0 then
+            return nil, "bad timeout"
+        end
+    end
+
+    if pool_size == nil then
+        pool_size = 0
+
+    else
+        pool_size = tonumber(pool_size)
+        if not pool_size or pool_size < 1 then
+            return nil, "bad pool_size"
+        end
     end
 
     local r = get_request()
@@ -828,8 +860,7 @@ function client.set_keepalive(self, timeout, pool_size)
     end
 
     local err, errlen = new_err_buf()
-    local rc = c_keepalive(r, self._op, timeout or 0, pool_size or 0, err,
-                           errlen)
+    local rc = c_keepalive(r, self._op, timeout, pool_size, err, errlen)
 
     self._connected = false
 
