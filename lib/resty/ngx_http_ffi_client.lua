@@ -121,13 +121,16 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         ngx_http_ffi_client_ffi_resp_t *resp, unsigned char *err,
         size_t *errlen);
     int ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
-        ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_chunk_t *chunk,
-        unsigned char *err, size_t *errlen);
+        ngx_http_ffi_client_op_t *op, uintptr_t generation,
+        ngx_http_ffi_client_ffi_chunk_t *chunk, unsigned char *err,
+        size_t *errlen);
     int ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
         ngx_http_ffi_client_op_t *op, uintptr_t idle_timeout,
         uintptr_t pool_size, unsigned char *err, size_t *errlen);
     void ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
-        ngx_http_ffi_client_ffi_resp_t *resp);
+        uintptr_t generation, ngx_http_ffi_client_ffi_resp_t *resp);
+    uintptr_t ngx_http_ffi_client_ffi_get_generation(
+        ngx_http_ffi_client_op_t *op);
     uintptr_t ngx_http_ffi_client_ffi_get_reused_times(
         ngx_http_ffi_client_op_t *op);
     void ngx_http_ffi_client_ffi_close(ngx_http_ffi_client_op_t *op);
@@ -471,7 +474,7 @@ local res_mt
 
 local c_loaded
 local c_new, c_set_timeouts, c_connect, c_send, c_read, c_keepalive
-local c_reused, c_close, c_trailers
+local c_reused, c_close, c_trailers, c_generation
 
 
 local function load_stateful()
@@ -489,6 +492,7 @@ local function load_stateful()
         c_reused = C.ngx_http_ffi_client_ffi_get_reused_times
         c_close = C.ngx_http_ffi_client_ffi_close
         c_trailers = C.ngx_http_ffi_client_ffi_get_trailers
+        c_generation = C.ngx_http_ffi_client_ffi_get_generation
     end)
 
     if not ok then
@@ -667,9 +671,10 @@ function client.connect(self, opts, port_arg)
 end
 
 
--- One body slice. The C side hands back a pointer into its read buffer that is
--- only valid until the next call, so the copy into a Lua string happens here.
-local function read_chunk(self)
+-- One body slice of the response `generation` names. The C side hands back a
+-- pointer into its read buffer that is only valid until the next call, so the
+-- copy into a Lua string happens here.
+local function read_chunk(self, generation)
     local r = get_request()
     if not r then
         error("no request found", 2)
@@ -678,7 +683,7 @@ local function read_chunk(self)
     local chunk = self._chunk
     local err, errlen = new_err_buf()
 
-    local rc = c_read(r, self._op, chunk, err, errlen)
+    local rc = c_read(r, self._op, generation, chunk, err, errlen)
 
     if rc == FFI_ERROR then
         return nil, ffi_str(err, errlen[0])
@@ -702,7 +707,11 @@ local function read_chunk(self)
 end
 
 
-local function make_body_reader(res, resp)
+-- A reader is bound to the response it came from by its generation. The C side
+-- refuses a read whose generation is no longer the one the connection is on,
+-- so a reader kept past its response ("stale body reader") can never be handed
+-- a later response's bytes.
+local function make_body_reader(res, resp, generation)
     local self = res._httpc
     local done = false
 
@@ -711,7 +720,7 @@ local function make_body_reader(res, resp)
             return nil
         end
 
-        local chunk, err, eof = read_chunk(self)
+        local chunk, err, eof = read_chunk(self, generation)
 
         if err then
             done = true
@@ -722,7 +731,7 @@ local function make_body_reader(res, resp)
             done = true
             -- trailers arrive behind the last chunk, so they are only readable
             -- now that the body is fully consumed
-            c_trailers(self._op, resp)
+            c_trailers(self._op, generation, resp)
             res.trailers = header_table(resp.trailers, resp.trailers_len)
         end
 
@@ -866,7 +875,8 @@ function client.request(self, params)
         res.trailers = header_table(resp.trailers, resp.trailers_len)
     end
 
-    res.body_reader = make_body_reader(res, resp)
+    res.body_reader = make_body_reader(res, resp,
+                                       tonumber(c_generation(self._op)))
 
     return res
 end

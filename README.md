@@ -61,6 +61,12 @@ the whole body and resumes the coroutine once, with `res.body` ready. Use it for
 bounded bodies; a stream read with `body_reader` is the right call for SSE and
 very large responses.
 
+A `body_reader` belongs to the response it came from. Once the connection has
+moved on, through another `request`, a `set_keepalive` or a `close`, the reader
+returns `nil, "stale body reader"` rather than bytes of whatever response came
+after it. The check lives in C, so it holds for an FFI caller that drives the
+module directly as well.
+
 ### Headers
 
 `res.headers` and `res.trailers` follow the `lua-resty-http` contract.

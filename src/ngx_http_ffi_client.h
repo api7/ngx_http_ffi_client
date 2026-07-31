@@ -271,6 +271,13 @@ struct ngx_http_ffi_client_op_s {
     size_t                               errlen;
     /* stateful-object state; the one-shot path leaves all of it zero */
     ngx_http_ffi_client_pending_e        pending;
+    /*
+     * Which response the op is currently on. It only ever goes up: every
+     * request, every set_keepalive and every close moves it, so a body reader
+     * that captured an older value can be told apart from one reading the
+     * response it was made for. 0 means no response yet.
+     */
+    ngx_uint_t                           generation;
     ngx_http_ffi_client_ffi_chunk_t     *ffi_chunk;
     ngx_str_t                            host;
     u_char                              *rbuf;
@@ -371,11 +378,18 @@ ngx_int_t ngx_http_ffi_client_ffi_connect(ngx_http_request_t *r,
 ngx_int_t ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_reqp_t *rp,
     ngx_http_ffi_client_ffi_resp_t *resp, u_char *err, size_t *errlen);
+/*
+ * generation names the response the caller means to read. It comes from
+ * ffi_get_generation right after the request that produced it, and a call
+ * carrying a stale one is refused instead of reading a later response's bytes.
+ */
 ngx_int_t ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
-    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_chunk_t *chunk,
-    u_char *err, size_t *errlen);
+    ngx_http_ffi_client_op_t *op, ngx_uint_t generation,
+    ngx_http_ffi_client_ffi_chunk_t *chunk, u_char *err, size_t *errlen);
 void ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
-    ngx_http_ffi_client_ffi_resp_t *resp);
+    ngx_uint_t generation, ngx_http_ffi_client_ffi_resp_t *resp);
+ngx_uint_t ngx_http_ffi_client_ffi_get_generation(
+    ngx_http_ffi_client_op_t *op);
 ngx_int_t ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_msec_t idle_timeout,
     ngx_uint_t pool_size, u_char *err, size_t *errlen);

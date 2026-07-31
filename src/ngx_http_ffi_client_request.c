@@ -2014,6 +2014,7 @@ ngx_http_ffi_client_op_reset(ngx_http_ffi_client_op_t *op)
 {
     u_char              *rbuf;
     size_t               rbuf_size;
+    ngx_uint_t           generation;
     ngx_msec_t           connect_timeout, send_timeout, read_timeout;
     ngx_http_request_t  *r;
 
@@ -2025,6 +2026,7 @@ ngx_http_ffi_client_op_reset(ngx_http_ffi_client_op_t *op)
     r = op->r;
     rbuf = op->rbuf;
     rbuf_size = op->rbuf_size;
+    generation = op->generation;
     connect_timeout = op->connect_timeout;
     send_timeout = op->send_timeout;
     read_timeout = op->read_timeout;
@@ -2035,6 +2037,9 @@ ngx_http_ffi_client_op_reset(ngx_http_ffi_client_op_t *op)
     op->stateful = 1;
     op->rbuf = rbuf;
     op->rbuf_size = rbuf_size;
+    /* carried over, never restarted: a reader from the previous connection must
+     * stay distinguishable from the responses of the next one */
+    op->generation = generation;
     op->connect_timeout = connect_timeout;
     op->send_timeout = send_timeout;
     op->read_timeout = read_timeout;
@@ -2378,6 +2383,8 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
     op->body_offset = 0;
     op->received = 0;
     op->request_sent = 1;
+    /* a new response starts here, so a reader of the previous one is stale */
+    op->generation++;
     op->resumed = 0;
     op->pending = NGX_HTTP_FFI_CLIENT_PENDING_REQUEST;
     op->state = NGX_HTTP_FFI_CLIENT_WRITING;
@@ -2398,13 +2405,19 @@ ngx_http_ffi_client_ffi_send_request(ngx_http_request_t *r,
  */
 ngx_int_t
 ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
-    ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_chunk_t *chunk,
-    u_char *err, size_t *errlen)
+    ngx_http_ffi_client_op_t *op, ngx_uint_t generation,
+    ngx_http_ffi_client_ffi_chunk_t *chunk, u_char *err, size_t *errlen)
 {
     ngx_int_t  rc;
 
     if (op == NULL || chunk == NULL) {
         return ngx_http_ffi_client_set_err(err, errlen, "bad read");
+    }
+
+    /* the response this reader was made for is gone, so reading now would hand
+     * back bytes of whatever response the op moved on to */
+    if (generation != op->generation) {
+        return ngx_http_ffi_client_set_err(err, errlen, "stale body reader");
     }
 
     if (op->pending != NGX_HTTP_FFI_CLIENT_PENDING_NONE) {
@@ -2475,7 +2488,7 @@ ngx_http_ffi_client_ffi_read_body(ngx_http_request_t *r,
  */
 void
 ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
-    ngx_http_ffi_client_ffi_resp_t *resp)
+    ngx_uint_t generation, ngx_http_ffi_client_ffi_resp_t *resp)
 {
     if (op == NULL || resp == NULL) {
         return;
@@ -2484,11 +2497,25 @@ ngx_http_ffi_client_ffi_get_trailers(ngx_http_ffi_client_op_t *op,
     resp->trailers = NULL;
     resp->trailers_len = 0;
 
+    /* trailers belong to one response, same as its body */
+    if (generation != op->generation) {
+        return;
+    }
+
     if (!op->parser.done) {
         return;
     }
 
     ngx_http_ffi_client_response_trailers_to_ffi(&op->parser, resp);
+}
+
+
+/* The response the op is on right now. A caller captures it with the response
+ * it just got and hands it back on every read of that response's body. */
+ngx_uint_t
+ngx_http_ffi_client_ffi_get_generation(ngx_http_ffi_client_op_t *op)
+{
+    return op == NULL ? 0 : op->generation;
 }
 
 
@@ -2548,6 +2575,9 @@ ngx_http_ffi_client_ffi_set_keepalive(ngx_http_request_t *r,
 
     op->connected = 0;
     op->request_sent = 0;
+    /* the connection is the pool's again: readers of the response it carried
+     * must not touch whatever the next borrower reads on it */
+    op->generation++;
     ngx_http_ffi_client_clear_cleanup(op);
 
     return NGX_OK;
@@ -2569,6 +2599,8 @@ ngx_http_ffi_client_ffi_close(ngx_http_ffi_client_op_t *op)
     op->conn_broken = 0;
     op->request_sent = 0;
     op->close_requested = 0;
+    /* the response is gone with the connection */
+    op->generation++;
 
     ngx_http_ffi_client_clear_cleanup(op);
 }
