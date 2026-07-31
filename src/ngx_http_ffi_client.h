@@ -146,6 +146,12 @@ typedef struct {
     unsigned                         error:1;
     /* the request was a HEAD: the response is bodyless whatever it announces */
     unsigned                         head:1;
+    /* the message being parsed is an interim 1xx, so it is dropped rather than
+     * handed back, and the parser starts over on the response behind it */
+    unsigned                         interim:1;
+    /* an interim response just ended: the next message llhttp starts is the
+     * one it precedes, not a smuggled second response */
+    unsigned                         interim_done:1;
 } ngx_http_ffi_client_response_parser_t;
 
 #else
@@ -168,6 +174,9 @@ typedef struct {
     unsigned                         done:1;
     unsigned                         connection_close:1;
     unsigned                         head:1;
+    /* the message just parsed is an interim 1xx: it is dropped and the parser
+     * starts over on the response behind it */
+    unsigned                         interim:1;
     /* no content-length and no chunked encoding: the body ends at the close */
     unsigned                         eof_framed:1;
 } ngx_http_ffi_client_response_parser_t;

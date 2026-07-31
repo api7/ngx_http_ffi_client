@@ -520,7 +520,41 @@ GET /t
 
 
 
-=== TEST 15: an interim response arriving in its own read is refused
+=== TEST 15: an interim response is consumed and the final one is the answer
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12823,
+                path = "/",
+                timeout = 1000,
+            })
+
+            if not res then
+                ngx.say(err)
+                return
+            end
+
+            ngx.say(res.status, " ", res.body)
+        }
+    }
+--- tcp_listen: 12823
+--- tcp_reply eval
+"HTTP/1.1 100 Continue\r\n\r\n"
+. "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfinal"
+--- request
+GET /t
+--- response_body
+200 final
+--- no_error_log
+[error]
+
+
+
+=== TEST 16: an interim response arriving in its own read is consumed too
 --- http_config eval: $::HttpConfig
 --- config
     location = /interim {
@@ -528,8 +562,8 @@ GET /t
             ngx.req.read_body()
             local sock = assert(ngx.req.socket(true))
 
-            -- the sleep splits the two messages across separate reads, which
-            -- is what lets an accepted 1xx strand the final response
+            -- the sleep splits the two messages across separate reads, so the
+            -- parser has to carry the interim state from one read to the next
             sock:send("HTTP/1.1 100 Continue\r\n\r\n")
             ngx.sleep(0.1)
             pcall(sock.send, sock,
@@ -540,34 +574,185 @@ GET /t
     location /t {
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = ngx.var.server_port,
+                path = "/interim",
+                timeout = 1000,
+            })
 
-            -- twice: a pooled connection would hand the stranded final
-            -- response to the second request as if it were its own
+            ngx.say(res and (res.status .. " " .. res.body) or err)
+        }
+    }
+--- request
+GET /t
+--- response_body
+200 final
+--- no_error_log
+[alert]
+
+
+
+=== TEST 17: the headers of an interim response stay out of the final one
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12824,
+                path = "/",
+                timeout = 1000,
+            })
+
+            if not res then
+                ngx.say(err)
+                return
+            end
+
+            ngx.say(res.status)
+            ngx.say("link: ", res.headers["Link"] or "none")
+            ngx.say("x-final: ", res.headers["X-Final"] or "none")
+            ngx.say(res.body)
+        }
+    }
+--- tcp_listen: 12824
+--- tcp_reply eval
+"HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\n"
+. "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Final: yes\r\n\r\nhi"
+--- request
+GET /t
+--- response_body
+200
+link: none
+x-final: yes
+hi
+--- no_error_log
+[error]
+
+
+
+=== TEST 18: the streaming path skips interim responses as well
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local httpc = client.new()
+            httpc:set_timeouts(1000, 1000, 1000)
+
+            local ok, err = httpc:connect({ host = "127.0.0.1", port = 12825 })
+            if not ok then
+                ngx.say(err)
+                return
+            end
+
+            local res, rerr = httpc:request({ path = "/" })
+            if not res then
+                ngx.say(rerr)
+                return
+            end
+
+            ngx.say(res.status, " ", res:read_body())
+            httpc:close()
+        }
+    }
+--- tcp_listen: 12825
+--- tcp_reply eval
+"HTTP/1.1 100 Continue\r\n\r\n"
+. "HTTP/1.1 100 Continue\r\n\r\n"
+. "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstream"
+--- request
+GET /t
+--- response_body
+200 stream
+--- no_error_log
+[error]
+
+
+
+=== TEST 19: a 101 is refused: the connection stops speaking HTTP after it
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12826,
+                path = "/",
+                timeout = 1000,
+            })
+
+            ngx.say(res and ("unexpected " .. res.status) or err)
+        }
+    }
+--- tcp_listen: 12826
+--- tcp_reply eval
+"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+. "Connection: Upgrade\r\n\r\n"
+--- request
+GET /t
+--- response_body
+protocol switch is not supported
+--- no_error_log
+[error]
+
+
+
+=== TEST 20: a connection that carried an interim response is still poolable
+--- http_config eval: $::HttpConfig
+--- config
+    location = /expect {
+        content_by_lua_block {
+            -- reading the body is what makes nginx answer the Expect header
+            -- with its own 100 Continue ahead of this response
+            ngx.req.read_body()
+            ngx.header["Content-Length"] = 2
+            ngx.print("ok")
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+
+            -- a stranded final response would be handed to the second request
+            -- as if it were its own
             for i = 1, 2 do
                 local res, err = client.request_uri({
                     host = "127.0.0.1",
                     port = ngx.var.server_port,
-                    path = "/interim",
+                    method = "POST",
+                    path = "/expect",
+                    headers = { ["Expect"] = "100-continue" },
+                    body = "hello",
                     keepalive = { pool_size = 4 },
                     timeout = 1000,
                 })
 
-                ngx.say(res and ("unexpected " .. res.status .. " " .. res.body)
-                            or err)
+                if not res then
+                    ngx.say(err)
+                    return
+                end
+
+                ngx.say(res.status, " reused=", tostring(res.reused), " ",
+                        res.body)
             end
         }
     }
 --- request
 GET /t
 --- response_body
-interim response is not supported
-interim response is not supported
+200 reused=false ok
+200 reused=true ok
 --- no_error_log
-[alert]
+[error]
 
 
 
-=== TEST 16: a refused connect reports the socket error
+=== TEST 21: a refused connect reports the socket error
 --- http_config eval: $::HttpConfig
 --- config
     location /t {

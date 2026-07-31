@@ -14,6 +14,7 @@ local type = type
 local pairs = pairs
 local setmetatable = setmetatable
 local string_lower = string.lower
+local string_gsub = string.gsub
 local table_concat = table.concat
 local ngx_encode_args = ngx.encode_args
 local co_yield = coroutine._yield
@@ -194,8 +195,17 @@ local function build_headers(headers)
         end
 
         if value ~= nil and not forbidden_header(key) then
-            n = n + 1
-            kept[n] = { key, tostring(value) }
+            if type(value) == "table" then
+                -- a repeated header, the shape a response hands back
+                for i = 1, #value do
+                    n = n + 1
+                    kept[n] = { key, tostring(value[i]) }
+                end
+
+            else
+                n = n + 1
+                kept[n] = { key, tostring(value) }
+            end
         end
     end
 
@@ -214,13 +224,58 @@ local function build_headers(headers)
 end
 
 
+-- Lookup on a response header table, as lua-resty-http does it: the name is
+-- matched without regard to case, and "_" reads as "-", so res.headers.foo_bar
+-- finds a Foo-Bar the peer sent in any casing. Names the peer used verbatim hit
+-- the table directly and never reach this.
+local headers_mt = {
+    __index = function(self, key)
+        if type(key) ~= "string" then
+            return nil
+        end
+
+        local hyphenated = string_gsub(key, "_", "-")
+        local want = string_lower(hyphenated)
+
+        for name, value in pairs(self) do
+            if string_lower(name) == want then
+                return value
+            end
+        end
+
+        return nil
+    end,
+}
+
+
+-- Header names stay as the peer sent them. A name that arrives more than once
+-- becomes an array of its values, the contract lua-resty-http callers rely on
+-- for Set-Cookie.
 local function header_table(arr, count)
-    local out = {}
+    local out = setmetatable({}, headers_mt)
+    local seen = {}
 
     for i = 0, tonumber(count) - 1 do
         local header = arr[i]
-        out[ffi_str(header.key.data, header.key.len)] =
-            ffi_str(header.value.data, header.value.len)
+        local key = ffi_str(header.key.data, header.key.len)
+        local value = ffi_str(header.value.data, header.value.len)
+        local name = string_lower(key)
+        local first = seen[name]
+
+        if first == nil then
+            seen[name] = key
+            out[key] = value
+
+        else
+            local previous = out[first]
+
+            if type(previous) == "table" then
+                previous[#previous + 1] = value
+
+            else
+                out[first] = { previous, value }
+            end
+        end
     end
 
     return out
