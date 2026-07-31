@@ -420,6 +420,16 @@ ngx_http_ffi_client_on_headers_complete(llhttp_t *p)
 
     parser->status = llhttp_get_status_code(p);
 
+    /* the status codes start at 100: anything below it is not a status this
+     * client can act on, and treating it as interim would wait for a response
+     * that never comes */
+    if (parser->status < 100) {
+        parser->error = 1;
+        (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                           "invalid response status");
+        return -1;
+    }
+
     if (parser->status < 200) {
         /*
          * An interim response is not the answer: the real one follows it on the
@@ -498,6 +508,13 @@ ngx_http_ffi_client_on_message_complete(llhttp_t *p)
     parser = ngx_http_ffi_client_llhttp_parser(p);
 
     if (parser->interim) {
+        if (++parser->interim_count > NGX_HTTP_FFI_CLIENT_MAX_INTERIM) {
+            parser->error = 1;
+            (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                               "too many interim responses");
+            return -1;
+        }
+
         /* the interim response is consumed here: everything it left behind
          * goes, so the final one is parsed into a clean state */
         parser->interim = 0;

@@ -589,7 +589,7 @@ GET /t
 --- response_body
 200 final
 --- no_error_log
-[alert]
+[error]
 
 
 
@@ -654,7 +654,7 @@ hi
                 return
             end
 
-            ngx.say(res.status, " ", res:read_body())
+            ngx.say(res.status, " ", assert(res:read_body()))
             httpc:close()
         }
     }
@@ -752,7 +752,64 @@ GET /t
 
 
 
-=== TEST 21: a refused connect reports the socket error
+=== TEST 21: a stream of interim responses is cut off instead of followed
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12827,
+                path = "/",
+                timeout = 1000,
+            })
+
+            ngx.say(res and ("unexpected " .. res.status) or err)
+        }
+    }
+--- tcp_listen: 12827
+--- tcp_reply eval
+("HTTP/1.1 100 Continue\r\n\r\n" x 9)
+. "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfinal"
+--- request
+GET /t
+--- response_body
+too many interim responses
+--- no_error_log
+[error]
+
+
+
+=== TEST 22: a status below 100 is refused rather than read as interim
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12828,
+                path = "/",
+                timeout = 1000,
+            })
+
+            ngx.say(res and ("unexpected " .. res.status) or err)
+        }
+    }
+--- tcp_listen: 12828
+--- tcp_reply eval
+"HTTP/1.1 042 Bogus\r\n\r\n"
+--- request
+GET /t
+--- response_body
+invalid response status
+--- no_error_log
+[error]
+
+
+
+=== TEST 23: a refused connect reports the socket error
 --- http_config eval: $::HttpConfig
 --- config
     location /t {

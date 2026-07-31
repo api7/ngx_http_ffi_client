@@ -9,6 +9,8 @@
 #define NGX_HTTP_FFI_CLIENT_VERSION "0.0.1"
 #define NGX_HTTP_FFI_CLIENT_ERR_BUF_SIZE 256
 #define NGX_HTTP_FFI_CLIENT_READ_BUF_SIZE 4096
+/* interim 1xx responses one response may carry before it is refused */
+#define NGX_HTTP_FFI_CLIENT_MAX_INTERIM 8
 /* fallback size for a pool no caller sized */
 #define NGX_HTTP_FFI_CLIENT_KEEPALIVE_POOL_SIZE 30
 
@@ -130,6 +132,9 @@ typedef struct {
     ngx_http_ffi_client_dbuf_t       value;
     ngx_http_ffi_client_dbuf_t       body;
     ngx_uint_t                       status;
+    /* interim responses consumed so far: a peer that streams them would
+     * otherwise grow the request pool for as long as it keeps sending */
+    ngx_uint_t                       interim_count;
     u_char                          *err;
     size_t                          *errlen;
     /* streaming state: the body span produced by the last parse and the input
@@ -158,6 +163,9 @@ typedef struct {
 
 typedef struct {
     ngx_uint_t                       status;
+    /* interim responses consumed so far: a peer that streams them would
+     * otherwise grow the request pool for as long as it keeps sending */
+    ngx_uint_t                       interim_count;
     ngx_array_t                      headers;
     ngx_array_t                      trailers;
     off_t                            content_length;

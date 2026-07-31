@@ -97,6 +97,11 @@ ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
         }
 
         if (parser->interim) {
+            if (++parser->interim_count > NGX_HTTP_FFI_CLIENT_MAX_INTERIM) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "too many interim responses");
+            }
+
             /* the interim response is consumed here: its bytes and everything
              * it declared go, and the loop reads the message behind it */
             parser->raw->pos = header_end + 4;
@@ -329,8 +334,11 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
                                            "invalid response status line");
     }
 
+    /* the status codes start at 100: anything below it is not a status this
+     * client can act on, and treating it as interim would wait for a response
+     * that never comes */
     status = ngx_atoi(p + 9, 3);
-    if (status == NGX_ERROR) {
+    if (status == NGX_ERROR || status < 100) {
         return ngx_http_ffi_client_set_err(err, errlen,
                                            "invalid response status");
     }
