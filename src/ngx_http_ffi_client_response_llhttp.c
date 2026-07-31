@@ -419,20 +419,38 @@ ngx_http_ffi_client_on_headers_complete(llhttp_t *p)
     parser = ngx_http_ffi_client_llhttp_parser(p);
 
     parser->status = llhttp_get_status_code(p);
-    parser->headers_done = 1;
 
-    /*
-     * llhttp completes a 1xx as a message of its own, so the final response
-     * would be left on a connection the pool still considers reusable and the
-     * next request would read it as its own. Refuse until interim responses are
-     * consumed properly: api7/ngx_http_ffi_client#25.
-     */
-    if (parser->status < 200) {
+    /* the status codes start at 100: anything below it is not a status this
+     * client can act on, and treating it as interim would wait for a response
+     * that never comes */
+    if (parser->status < 100) {
         parser->error = 1;
         (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
-                                           "interim response is not supported");
+                                           "invalid response status");
         return -1;
     }
+
+    if (parser->status < 200) {
+        /*
+         * An interim response is not the answer: the real one follows it on the
+         * same connection. 101 is the exception, the connection stops speaking
+         * HTTP after it and this client has nothing to hand it over to.
+         */
+        if (parser->status == 101) {
+            parser->error = 1;
+            (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                               "protocol switch is not supported");
+            return -1;
+        }
+
+        parser->interim = 1;
+
+        /* 1 keeps llhttp from reading a body for it: an interim response has
+         * none, whatever it announces */
+        return 1;
+    }
+
+    parser->headers_done = 1;
 
     /* 1 tells llhttp the message has no body. 204 and 304 are bodyless by
      * status and llhttp already knows it; a HEAD response is only bodyless
@@ -489,6 +507,26 @@ ngx_http_ffi_client_on_message_complete(llhttp_t *p)
 
     parser = ngx_http_ffi_client_llhttp_parser(p);
 
+    if (parser->interim) {
+        if (++parser->interim_count > NGX_HTTP_FFI_CLIENT_MAX_INTERIM) {
+            parser->error = 1;
+            (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,
+                                               "too many interim responses");
+            return -1;
+        }
+
+        /* the interim response is consumed here: everything it left behind
+         * goes, so the final one is parsed into a clean state */
+        parser->interim = 0;
+        parser->interim_done = 1;
+        parser->headers.nelts = 0;
+        parser->status = 0;
+        parser->field.len = 0;
+        parser->value.len = 0;
+
+        return 0;
+    }
+
     parser->done = 1;
     parser->connection_close = llhttp_should_keep_alive(p) ? 0 : 1;
 
@@ -500,8 +538,9 @@ ngx_http_ffi_client_on_message_complete(llhttp_t *p)
  * llhttp only resets to start another message once one has completed. A single
  * request gets a single response, so a second one arriving behind the first is
  * response smuggling, not something to parse: without this the two messages
- * merge into one and the caller is handed a mix of both. Interim 1xx responses
- * land here too and are refused for now; consuming them properly is #25.
+ * merge into one and the caller is handed a mix of both. An interim 1xx is the
+ * one message that legitimately precedes another, so the reset behind it is
+ * the final response starting.
  */
 static int
 ngx_http_ffi_client_on_reset(llhttp_t *p)
@@ -509,6 +548,11 @@ ngx_http_ffi_client_on_reset(llhttp_t *p)
     ngx_http_ffi_client_response_parser_t *parser;
 
     parser = ngx_http_ffi_client_llhttp_parser(p);
+
+    if (parser->interim_done) {
+        parser->interim_done = 0;
+        return 0;
+    }
 
     parser->error = 1;
     (void) ngx_http_ffi_client_set_err(parser->err, parser->errlen,

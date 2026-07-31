@@ -410,6 +410,102 @@ ngx_http_ffi_client_has_crlf(u_char *data, size_t len)
 }
 
 
+/* one character of an RFC 9110 token */
+static ngx_uint_t
+ngx_http_ffi_client_is_tchar(u_char c)
+{
+    if ((c >= 'a' && c <= 'z')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9'))
+    {
+        return 1;
+    }
+
+    switch (c) {
+    case '!': case '#': case '$': case '%': case '&': case '\'':
+    case '*': case '+': case '-': case '.': case '^': case '_':
+    case '`': case '|': case '~':
+        return 1;
+
+    default:
+        return 0;
+    }
+}
+
+
+/*
+ * An RFC 9110 token, which is what a method and a header field name have to be.
+ * A CRLF check alone is not enough: a method of "GET /evil" or a field name of
+ * "X: injected" writes a request line and a header the caller never asked for.
+ */
+static ngx_uint_t
+ngx_http_ffi_client_is_token(u_char *data, size_t len)
+{
+    size_t  i;
+
+    if (len == 0 || data == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (!ngx_http_ffi_client_is_tchar(data[i])) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+
+/*
+ * A header field value: visible characters, space and horizontal tab, plus the
+ * obsolete high bytes RFC 9110 still tolerates. No control characters, so a NUL
+ * or a bare CR cannot end up on the wire.
+ */
+static ngx_uint_t
+ngx_http_ffi_client_is_field_value(u_char *data, size_t len)
+{
+    size_t  i;
+
+    if (len != 0 && data == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (data[i] == '\t') {
+            continue;
+        }
+
+        if (data[i] < ' ' || data[i] == 0x7f) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+
+/*
+ * Visible characters only: what the request target and the host may be made of,
+ * since a space or a control byte in either splits the request line. Bytes
+ * above ASCII are left alone; callers pass unencoded UTF-8 paths and
+ * lua-resty-http sends them as given.
+ */
+static ngx_uint_t
+ngx_http_ffi_client_is_vchar(u_char *data, size_t len)
+{
+    size_t  i;
+
+    for (i = 0; i < len; i++) {
+        if (data[i] <= ' ' || data[i] == 0x7f) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+
 #define ngx_http_ffi_client_header_eq(key, name)                              \
     ((key)->len == sizeof(name) - 1                                           \
      && ngx_strncasecmp((key)->data, (u_char *) name, sizeof(name) - 1) == 0)
@@ -505,7 +601,7 @@ ngx_http_ffi_client_build_host_header(ngx_pool_t *pool,
         return ngx_http_ffi_client_set_err(err, errlen, "host is required");
     }
 
-    if (ngx_http_ffi_client_has_crlf(req->host.data, req->host.len)) {
+    if (!ngx_http_ffi_client_is_vchar(req->host.data, req->host.len)) {
         return ngx_http_ffi_client_set_err(err, errlen, "invalid host");
     }
 
@@ -562,15 +658,17 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
         return ngx_http_ffi_client_set_err(err, errlen, "method is required");
     }
 
-    if (req->path.len == 0 || req->path.data == NULL || req->path.data[0] != '/')
+    if (!ngx_http_ffi_client_is_token(req->method.data, req->method.len)) {
+        return ngx_http_ffi_client_set_err(err, errlen, "invalid method");
+    }
+
+    if (req->path.len == 0 || req->path.data == NULL || req->path.data[0] != '/'
+        || !ngx_http_ffi_client_is_vchar(req->path.data, req->path.len))
     {
         return ngx_http_ffi_client_set_err(err, errlen, "invalid path");
     }
 
-    if (ngx_http_ffi_client_has_crlf(req->method.data, req->method.len)
-        || ngx_http_ffi_client_has_crlf(req->path.data, req->path.len)
-        || ngx_http_ffi_client_has_crlf(req->body.data, req->body.len))
-    {
+    if (ngx_http_ffi_client_has_crlf(req->body.data, req->body.len)) {
         return ngx_http_ffi_client_set_err(err, errlen, "invalid request");
     }
 
@@ -588,13 +686,9 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
     for (i = 0; i < req->headers_len; i++) {
         h = &req->headers[i];
 
-        if (h->key.len == 0 || h->key.data == NULL) {
-            return ngx_http_ffi_client_set_err(err, errlen,
-                                               "invalid request header");
-        }
-
-        if (ngx_http_ffi_client_has_crlf(h->key.data, h->key.len)
-            || ngx_http_ffi_client_has_crlf(h->value.data, h->value.len))
+        if (!ngx_http_ffi_client_is_token(h->key.data, h->key.len)
+            || !ngx_http_ffi_client_is_field_value(h->value.data,
+                                                   h->value.len))
         {
             return ngx_http_ffi_client_set_err(err, errlen,
                                                "invalid request header");

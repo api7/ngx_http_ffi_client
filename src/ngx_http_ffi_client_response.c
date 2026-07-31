@@ -83,7 +83,7 @@ ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
         return NGX_OK;
     }
 
-    if (!parser->headers_done) {
+    while (!parser->headers_done) {
         header_end = ngx_http_ffi_client_find_header_end(parser->raw->pos,
                                                          parser->raw->last);
         if (header_end == NULL) {
@@ -94,6 +94,23 @@ ngx_http_ffi_client_response_parse(ngx_pool_t *pool,
                                                errlen);
         if (rc != NGX_OK) {
             return rc;
+        }
+
+        if (parser->interim) {
+            if (++parser->interim_count > NGX_HTTP_FFI_CLIENT_MAX_INTERIM) {
+                return ngx_http_ffi_client_set_err(err, errlen,
+                                                   "too many interim responses");
+            }
+
+            /* the interim response is consumed here: its bytes and everything
+             * it declared go, and the loop reads the message behind it */
+            parser->raw->pos = header_end + 4;
+            parser->headers.nelts = 0;
+            parser->status = 0;
+            parser->content_length = -1;
+            parser->connection_close = 0;
+            parser->interim = 0;
+            continue;
         }
 
         parser->header_size = (header_end + 4) - parser->raw->pos;
@@ -317,8 +334,11 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
                                            "invalid response status line");
     }
 
+    /* the status codes start at 100: anything below it is not a status this
+     * client can act on, and treating it as interim would wait for a response
+     * that never comes */
     status = ngx_atoi(p + 9, 3);
-    if (status == NGX_ERROR) {
+    if (status == NGX_ERROR || status < 100) {
         return ngx_http_ffi_client_set_err(err, errlen,
                                            "invalid response status");
     }
@@ -451,23 +471,27 @@ ngx_http_ffi_client_parse_headers(ngx_pool_t *pool,
     }
 
     /*
+     * An interim response is not the answer: the real one follows it on the
+     * same connection, so it is dropped and the parser starts over. 101 is the
+     * exception, the connection stops speaking HTTP after it and this client
+     * has nothing to hand it over to.
+     */
+    if (parser->status < 200) {
+        if (parser->status == 101) {
+            return ngx_http_ffi_client_set_err(err, errlen,
+                                               "protocol switch is not supported");
+        }
+
+        parser->interim = 1;
+
+        return NGX_OK;
+    }
+
+    /*
      * A HEAD response and the bodyless status codes carry the header fields of
      * a body they never send, so the content-length they announce must be
      * ignored rather than waited for.
      */
-    if (parser->status < 200) {
-        /*
-         * An interim response is followed by the real one on the same
-         * connection. Completing it here would hand the 1xx back as the answer
-         * and leave the final response sitting on a connection the pool still
-         * considers reusable, where the next request would read it as its own.
-         * Refuse until interim responses are consumed properly:
-         * api7/ngx_http_ffi_client#25.
-         */
-        return ngx_http_ffi_client_set_err(err, errlen,
-                                           "interim response is not supported");
-    }
-
     if (parser->head || parser->status == 204 || parser->status == 304) {
         parser->content_length = 0;
         return NGX_OK;

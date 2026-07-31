@@ -61,6 +61,28 @@ the whole body and resumes the coroutine once, with `res.body` ready. Use it for
 bounded bodies; a stream read with `body_reader` is the right call for SSE and
 very large responses.
 
+### Headers
+
+`res.headers` and `res.trailers` follow the `lua-resty-http` contract.
+
+- Names are kept as the peer sent them, and a lookup matches without regard to
+  case, with `_` reading as `-`. `res.headers["Content-Type"]`,
+  `res.headers["content-type"]` and `res.headers.content_type` all reach the
+  same value.
+- A name that arrives more than once comes back as an array of its values, in
+  the order received, which is how `Set-Cookie` is read. A name that arrives
+  once is a plain string.
+- A request header may be given as an array too: each value is sent as its own
+  header line, so a response table can be passed straight back.
+
+### Request validation
+
+The method and every header name must be an RFC 9110 `token`, a header value
+must be free of control characters, and the path and host must be free of
+whitespace and control characters. A method of `GET /evil` or a header name of
+`X: injected` is refused before anything reaches the wire rather than writing a
+request line or a header the caller never asked for.
+
 ### Keepalive
 
 `set_keepalive(timeout, pool_size)` follows the cosocket contract that
@@ -158,12 +180,13 @@ settled, but the full production behavior is still being built.
    rejects `Transfer-Encoding` outright, so the chunked and trailer cases in
    `t/011-framing.t` run on the `llhttp` backend only.
 
-   An interim `1xx` response is refused for now. Completing it would hand the
-   `1xx` back as the answer and leave the final response on a connection the
-   pool still considers reusable, where the next request would read it as its
-   own. Consuming interim responses properly is #25, which also covers repeated
-   response headers and request token validation. mTLS is future client work in
-   this same C/Nginx module, handled at the transport layer rather than by
+   An interim `1xx` response is consumed and the parser starts over on the
+   response behind it, so a `100 Continue` or a `103 Early Hints` never reaches
+   the caller as the answer and never strands the final response on a pooled
+   connection. The headers of an interim response are dropped with it. A `101`
+   is the exception: the connection stops speaking HTTP after it and this client
+   has nothing to hand it over to, so it is refused. mTLS is future client work
+   in this same C/Nginx module, handled at the transport layer rather than by
    changing the protocol scope.
 
 5. **HTTP/2 and HTTP/3 are out of scope for the current project stage.** They
