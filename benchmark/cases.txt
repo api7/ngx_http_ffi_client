@@ -1,0 +1,59 @@
+# Canonical bench case list. One name per line, "#" starts a comment.
+#
+# This is the single source of truth: run.sh generates one target location per
+# name from this file, and the smoke check diffs it against the case table in
+# benchmark/lua/bench.lua so the two cannot drift apart.
+#
+# Names are <driver>.<shape>. A headline comparison is one shape read across the
+# ffi.* and resty.* columns; the ffi.oneshot-vs-ffi.stateful gap prices the C
+# fast path against this library's own Lua object layer.
+
+# --- the 2x2 ---
+ffi.oneshot
+resty.oneshot
+ffi.stateful
+resty.stateful
+
+# --- read mode ---
+ffi.readbody
+resty.readbody
+ffi.stream
+resty.stream
+
+# --- connection lifetime ---
+ffi.short
+resty.short
+
+# --- method ---
+ffi.post
+resty.post
+
+# --- transport ---
+ffi.tls
+resty.tls
+ffi.tlsshort
+resty.tlsshort
+ffi.tlsverify
+resty.tlsverify
+ffi.tlsverifyshort
+resty.tlsverifyshort
+
+# --- peer address ---
+ffi.dns
+resty.dns
+
+# --- response framing ---
+ffi.chunked
+resty.chunked
+ffi.trailers
+resty.trailers
+
+# --- response header count ---
+ffi.hdr40
+resty.hdr40
+ffi.cookies
+resty.cookies
+
+# --- request header count ---
+ffi.req30
+resty.req30

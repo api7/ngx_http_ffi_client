@@ -201,20 +201,52 @@ protocol work is intentionally deferred.
 ## Benchmark
 
 The local benchmark pins the target OpenResty worker to one CPU core and
-compares three request paths: a no-upstream baseline, the C FFI client, and
-`resty.http`. The latest 15-second local runs used wrk2 with a saturated target
-worker.
+compares a no-upstream baseline against both clients across a matrix of request
+shapes: one-shot and stateful, buffered and streaming, plaintext and TLS, IP
+literal and hostname, content-length and chunked framing.
 
-| wrk2 connections | no-upstream baseline | C FFI client | `resty.http` | C FFI / `resty.http` QPS | outbound cost ratio (`resty.http` / C FFI) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `10` | `83998.04` QPS | `32831.68` QPS | `16123.19` QPS | `2.04x` | `2.70x` |
-| `100` | `96155.73` QPS | `38582.72` QPS | `14665.62` QPS | `2.63x` | `3.72x` |
+Median of 5 repeats, 30s measured each, target worker saturated on every row,
+no non-2xx responses, `llhttp` parser, 1KB response body, 100 wrk2 connections:
 
-The C FFI path delivers substantially higher end-to-end throughput than
-`resty.http`, and the baseline-derived estimate shows `resty.http` spending
-about `2.70x` to `3.72x` as much outbound client CPU time as the C FFI path in
-these local runs. See
-[benchmark/README.md](benchmark/README.md) for the benchmark topology,
-reproduction notes, and detailed measurements.
+| shape | C FFI | `resty.http` | C FFI / `resty.http` | outbound cost ratio |
+| --- | ---: | ---: | ---: | ---: |
+| one-shot (`request_uri`) | `30154` QPS | `14785` QPS | `2.04x` | `2.64x` |
+| stateful object | `27316` QPS | `15382` QPS | `1.78x` | `2.16x` |
+
+Baseline without an upstream call: `82185` QPS. The outbound cost ratio
+subtracts that baseline from both client paths and compares what is left, which
+is the closest this gets to isolating the client itself.
+
+Per-request Lua heap churn, which is the direct test of the claim that response
+handling stays in C:
+
+| shape | C FFI | `resty.http` |
+| --- | ---: | ---: |
+| one-shot | `2.49` KB | `7.45` KB |
+| stateful | `3.33` KB | `6.49` KB |
+
+**These supersede the previously published `2.04x`-`2.63x` QPS and
+`2.70x`-`3.72x` outbound figures, which were withdrawn.** Those compared the C
+one-shot fast path against a stateful `lua-resty-http` object, so the ratio
+contained the API-shape difference as well as the C-versus-Lua difference and
+credited all of it to the latter. They also predate per-request token
+validation, the case-insensitive header table with repeated headers folded into
+arrays, `llhttp` as the default parser, interim `1xx` consumption, and trailer
+parsing, all of which add hot-path work. Matching the shapes and re-measuring
+the current library moves the honest one-shot figure from `2.63x` to `2.04x`.
+
+Across the full case matrix the ratio holds between `1.68x` and `1.96x` for
+streaming, chunked framing, hostname resolution, POST bodies, and header-heavy
+responses, and reaches `4.41x` on responses with trailers.
+
+**Where this client loses.** The advantage is in per-request work, so it shrinks
+as connection setup takes over the request and eventually reverses: `1.49x` on
+pooled TLS, `1.19x` on short-lived plaintext connections, and `0.79x` on a fresh
+TLS handshake per request, where `lua-resty-http` is about 21% faster. Anything
+that cannot hold a keepalive pool, TLS to many short-lived peers most of all, is
+a case for the other client today.
+
+See [benchmark/README.md](benchmark/README.md) for the topology, the full case
+matrix, the fairness audit, and how to reproduce.
 
 Design notes and implementation plans used during development live under `docs/superpowers/` and are intentionally ignored by git.
