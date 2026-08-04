@@ -197,3 +197,150 @@ That is a 42x gap at p99.9. It is also unstable across repeats: the three
 `resty.trailers` p99.9 samples were 109.570, 196.610 and 11.970 ms (p99: 43.520,
 126.850 and 3.600 ms), while `ffi.trailers` produced 2.690, 2.600 and 2.560 ms.
 The median reported above is the middle sample in each case.
+
+---
+
+# TLS re-measurement after the trust-store fix (`fix`)
+
+Run finished 2026-08-04, after the run recorded above. This section records a
+targeted re-measurement of the TLS shapes following the fix in
+`src/ngx_http_ffi_client_request.c` that stopped the client rescanning the CA
+directory on every handshake. It supersedes the `tls` and `tlsshort` numbers in
+the `full` run above; every other shape in this file is unaffected and still
+stands.
+
+## What was run
+
+- Run parameters: `BENCH_RUN_ID=fix`, `BENCH_REPEATS=5`,
+  `BENCH_LATENCY_REPEATS=3`, `BENCH_CASES="ffi.tls resty.tls ffi.tlsshort
+  resty.tlsshort ffi.tlsverify resty.tlsverify ffi.tlsverifyshort
+  resty.tlsverifyshort"`.
+- Same topology as the `full` run: target worker pinned to CPU 0, upstream on
+  CPUs 1-5, `wrk2` on CPUs 6-7.
+- The run exited 0. The fairness audit passed for all four shapes. All 40
+  throughput windows passed the saturation gate with zero non-2xx and zero
+  socket errors; nothing was discarded.
+- `requests_per_connection` is `1.0` for both clients on all four short-lived
+  cases, so those windows really are measuring a fresh connection and handshake
+  per request rather than a partly-pooled result.
+- Raw rows: `benchmark/.run-fix/results/fix.csv`, 64 data rows.
+
+## The defect
+
+`ngx_http_ffi_client_ssl_ctx()` called `SSL_CTX_set_default_verify_paths()`
+unconditionally. That registers the hashed CA directory as
+`X509_FILETYPE_DEFAULT`, and under `DEFAULT` OpenSSL enumerates the entire
+directory on *every* handshake instead of opening the single `<hash>.N` file the
+lookup needs.
+
+Found with `perf`, sampling the pinned target worker for 40 s during each case
+(~40000 samples each). Every top entry in the `perf diff` is kernel
+directory-reading code, present only on the FFI side:
+
+```
+Baseline  Delta Abs  Symbol
+           +2.04%  [k] filldir64
+           +2.01%  [k] ext4_htree_store_dirent
+           +1.82%  [k] str2hashbuf_signed
+           +1.76%  [k] half_md4_transform
+           +1.05%  [k] htree_dirblock_to_tree
+```
+
+| | C FFI | `lua-resty-http` |
+| --- | ---: | ---: |
+| CPU in directory-lookup code | `11.83%` | `0.42%` |
+| CPU in the kernel overall | `36.7%` | `17.9%` |
+
+Confirmed at the syscall level under load: 2132 `openat` plus 4264 `getdents64`
+for ~2168 requests, one full sweep of a 245-entry directory per handshake. The
+same trace during `resty.tlsshort` caught none. After the fix, tracing both
+`ffi.tlsshort` and `ffi.tlsverifyshort` caught none either.
+
+The cost is the filetype, not hash-directory lookup and not lookup failure.
+Reproduced independently of this module with `openssl s_client` against the
+benchmark upstream:
+
+| trust store setup | `getdents64` calls | verify result |
+| --- | ---: | --- |
+| `set_default_verify_paths()` | `4` | 18 (self-signed) |
+| explicit `-CAfile` system bundle | `0` | 18 |
+| explicit `-CApath` system dir | `0` | 18 |
+| explicit `-CApath`, issuer present | `0` | 0 (ok) |
+
+## Throughput (median of 5 saturated repeats)
+
+| shape | C FFI | `lua-resty-http` | ratio |
+| --- | ---: | ---: | ---: |
+| `tls` | `18276.36` req/s | `11926.11` req/s | `1.53x` |
+| `tlsshort` | `1256.86` req/s | `1142.44` req/s | `1.10x` |
+| `tlsverify` | `17542.73` req/s | `11861.35` req/s | `1.48x` |
+| `tlsverifyshort` | `1228.67` req/s | `1136.91` req/s | `1.08x` |
+
+Against the `full` run above:
+
+| shape | before | after | ratio before | ratio after |
+| --- | ---: | ---: | ---: | ---: |
+| `ffi.tlsshort` | `932.16` req/s | `1256.86` req/s | `0.81x` | `1.10x` |
+| `ffi.tls` | `18655.46` req/s | `18276.36` req/s | `1.57x` | `1.53x` |
+
+`tlsshort` gains 35% and turns the only losing shape in the matrix into a win.
+Pooled `tls` is unchanged within run-to-run spread, as expected: it amortises
+one handshake over many requests, so the sweep was never a large share of its
+cost.
+
+`tlsverify` and `tlsverifyshort` are new. The matrix had never exercised
+`ssl_verify = true` — all four call sites in `benchmark/lua/bench.lua` hardcoded
+`false` — so the verifying path was previously unmeasured. Verification costs
+the FFI client about 4% on pooled TLS (`18276` to `17543`) and roughly 2% on the
+short-lived shape, which is real chain-checking work rather than the pathological
+sweep.
+
+## Latency (fixed rate, corrected for coordinated omission)
+
+Median of 3 repeats. **These numbers are less trustworthy than the throughput
+figures above and should not be quoted for the short-lived shapes** — see the
+caveat below.
+
+| case | p50 | p99 | p99.9 |
+| --- | ---: | ---: | ---: |
+| `ffi.tls` | `1.650` ms | `4.130` ms | `4.880` ms |
+| `resty.tls` | `1.260` ms | `2.700` ms | `3.270` ms |
+| `ffi.tlsshort` | `3.500` ms | `5.810` ms | `7.710` ms |
+| `resty.tlsshort` | `3.620` ms | `6.280` ms | `8.330` ms |
+| `ffi.tlsverify` | `1.170` ms | `2.460` ms | `2.930` ms |
+| `resty.tlsverify` | `2.330` ms | `5.460` ms | `6.420` ms |
+| `ffi.tlsverifyshort` | `23.220` ms | `46.720` ms | `48.380` ms |
+| `resty.tlsverifyshort` | `3.430` ms | `5.660` ms | `7.000` ms |
+
+### Caveat: rate attainment, not latency
+
+The latency phase drives each pair at a fixed rate — 60% of the slower side's
+saturated throughput. Several windows failed to reach that rate by roughly 2%,
+and wrk2's coordinated-omission correction converts a small rate shortfall into
+a large apparent latency, so those rows measure rate attainment rather than
+service time:
+
+| case | repeat | achieved / target req/s | p50 | worker CPU |
+| --- | ---: | ---: | ---: | ---: |
+| `ffi.tlsshort` | 1 | `683.85` / 685 | `3.500` ms | `57.0%` |
+| `ffi.tlsshort` | 2 | `672.02` / 685 | `24.400` ms | `55.8%` |
+| `ffi.tlsshort` | 3 | `683.89` / 685 | `3.490` ms | `57.5%` |
+| `ffi.tlsverifyshort` | 1 | `669.37` / 682 | `23.220` ms | `56.0%` |
+| `ffi.tlsverifyshort` | 2 | `669.38` / 682 | `23.500` ms | `56.4%` |
+| `ffi.tlsverifyshort` | 3 | `680.99` / 682 | `3.300` ms | `58.0%` |
+
+Every window that hit its target rate produced a ~3.3-3.5 ms p50; every window
+that missed produced ~23-24 ms. The worker had roughly 42% CPU headroom
+throughout, so this is not a CPU limit.
+
+This is not specific to the FFI client, though it hit it more often here.
+`resty.tlsverify` missed the rate on repeats 2 and 3 (`6982` against a `7088`
+target) and its p50 went from `1.270` ms to `2.330`/`2.410` ms; `ffi.tls`
+repeats 1 and 2 missed (`7020` against `7127`) with the same effect. Where both
+sides hit their target — `tlsverify` repeat 1, `tlsverifyshort` repeat 3 — the
+FFI client is faster at every percentile.
+
+The underlying cause is not yet understood. Candidates: connection-teardown
+asymmetry over which side holds `TIME_WAIT`, ephemeral port pressure at ~683 new
+connections per second, or a stall in the connect path. Until it is diagnosed,
+no latency claim should be published for the short-lived TLS shapes.
