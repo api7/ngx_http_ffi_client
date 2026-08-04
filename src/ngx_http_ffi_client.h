@@ -199,12 +199,18 @@ typedef struct ngx_http_ffi_client_keepalive_item_s
 
 
 #if (NGX_SSL)
-/* one cached client SSL_CTX per distinct trust config (trusted CA path) */
+/*
+ * One cached client SSL_CTX per distinct trust config. The key is the trusted
+ * CA path *and* whether verification is on: a verify-off context carries no
+ * trust store at all, so reusing one for a verify-on request would fail every
+ * chain it was asked to check.
+ */
 typedef struct ngx_http_ffi_client_ssl_ctx_s ngx_http_ffi_client_ssl_ctx_t;
 
 struct ngx_http_ffi_client_ssl_ctx_s {
     ngx_http_ffi_client_ssl_ctx_t    *next;
     ngx_str_t                         ca;
+    unsigned                          verify:1;
     ngx_ssl_t                        *ssl;
 };
 #endif
