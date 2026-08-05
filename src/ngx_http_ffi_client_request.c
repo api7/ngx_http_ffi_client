@@ -1623,17 +1623,28 @@ ngx_http_ffi_client_ssl_default_store(X509_STORE *store, ngx_log_t *log)
  * chain; when it is off no trust store is loaded at all, because OpenSSL
  * verifies the chain during every handshake regardless of the verify mode and
  * ngx_http_ffi_client_ssl_handshake_handler() only reads the result when the
- * caller asked for it. Returns NULL on failure without caching a half-built
- * context.
+ * caller asked for it, so with verify off `ca` is folded away and every such
+ * caller shares one context. Returns NULL on failure without caching a
+ * half-built context.
  */
 static ngx_ssl_t *
 ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
     ngx_str_t *ca, ngx_uint_t verify, ngx_log_t *log)
 {
     u_char                         *path;
+    ngx_str_t                       none = ngx_null_string;
     ngx_ssl_t                      *ssl;
     ngx_pool_cleanup_t             *cln;
     ngx_http_ffi_client_ssl_ctx_t  *node;
+
+    /* Nothing below reads `ca` unless `verify` is set, so a verify-off context
+     * is the same whatever CA the caller named. Fold it here, ahead of both the
+     * lookup and the cache node, so the two always agree: normalising only one
+     * of them would miss every time and leak a context per request. This must
+     * move if `ca` ever gains meaning with verify off. */
+    if (!verify) {
+        ca = &none;
+    }
 
     for (node = fmcf->ssl_ctxs; node != NULL; node = node->next) {
         /* guard memcmp: NULL pointers with len 0 are UB */
