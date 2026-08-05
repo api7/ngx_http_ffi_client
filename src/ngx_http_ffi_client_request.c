@@ -1578,6 +1578,8 @@ ngx_http_ffi_client_ssl_default_store(X509_STORE *store, ngx_log_t *log)
 
     lookup = X509_STORE_add_lookup(store, X509_LOOKUP_file());
     if (lookup == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "X509_STORE_add_lookup(X509_LOOKUP_file) failed");
         return NGX_ERROR;
     }
 
@@ -1591,6 +1593,8 @@ ngx_http_ffi_client_ssl_default_store(X509_STORE *store, ngx_log_t *log)
 
     lookup = X509_STORE_add_lookup(store, X509_LOOKUP_hash_dir());
     if (lookup == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "X509_STORE_add_lookup(X509_LOOKUP_hash_dir) failed");
         return NGX_ERROR;
     }
 
