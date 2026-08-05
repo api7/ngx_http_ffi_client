@@ -135,6 +135,7 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
 #if (NGX_SSL)
         op->ssl = 1;
         op->ssl_verify = req->ssl_verify ? 1 : 0;
+        op->ssl_session_reuse = req->ssl_session_reuse ? 1 : 0;
         if (req->ssl_server_name.len) {
             if (req->ssl_server_name.data == NULL) {
                 return ngx_http_ffi_client_set_err(err, errlen,
@@ -1668,6 +1669,11 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
         return NULL;
     }
 
+    if (ngx_http_ffi_client_ssl_session_cache_enable(ssl, log) != NGX_OK) {
+        ngx_ssl_cleanup_ctx(ssl);
+        return NULL;
+    }
+
     /* verify mode stays NONE so the handshake completes and we inspect the
      * result ourselves. An unusable trust store is a hard init failure: don't
      * cache a context that would fail every verify-on request. */
@@ -1865,6 +1871,14 @@ ngx_http_ffi_client_ssl_init_connection(ngx_http_ffi_client_op_t *op)
         return NGX_ERROR;
     }
 
+    if (op->ssl_session_reuse
+        && ngx_http_ffi_client_ssl_session_offer(op, c) != NGX_OK)
+    {
+        ngx_http_ffi_client_finalize(op, NGX_ERROR,
+                                     "failed to set up TLS session reuse");
+        return NGX_ERROR;
+    }
+
     op->state = NGX_HTTP_FFI_CLIENT_HANDSHAKING;
 
     rc = ngx_ssl_handshake(c);
@@ -1924,6 +1938,10 @@ ngx_http_ffi_client_ssl_handshake_handler(ngx_connection_t *c)
             return;
         }
     }
+
+    /* the peer passed every check this caller asked for, so the session it
+     * established may now be offered to the next connection */
+    ngx_http_ffi_client_ssl_session_commit(c);
 
     if (c->read->timer_set) {
         ngx_del_timer(c->read);
@@ -2286,6 +2304,7 @@ ngx_http_ffi_client_ffi_connect(ngx_http_request_t *r,
 #if (NGX_SSL)
         op->ssl = 1;
         op->ssl_verify = cp->ssl_verify ? 1 : 0;
+        op->ssl_session_reuse = cp->ssl_session_reuse ? 1 : 0;
 
         if (cp->ssl_server_name.len) {
             if (cp->ssl_server_name.data == NULL) {

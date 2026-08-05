@@ -13,6 +13,8 @@
 #define NGX_HTTP_FFI_CLIENT_MAX_INTERIM 8
 /* fallback size for a pool no caller sized */
 #define NGX_HTTP_FFI_CLIENT_KEEPALIVE_POOL_SIZE 30
+/* TLS sessions one worker keeps for resumption, evicted least recently used */
+#define NGX_HTTP_FFI_CLIENT_SSL_SESSION_CACHE_SIZE 256
 
 
 typedef struct {
@@ -47,6 +49,7 @@ typedef struct {
     ngx_uint_t                       ssl_verify;
     ngx_http_ffi_client_ffi_str_t    ssl_server_name;
     ngx_http_ffi_client_ffi_str_t    ssl_trusted_certificate;
+    ngx_uint_t                       ssl_session_reuse;
 } ngx_http_ffi_client_ffi_req_t;
 
 
@@ -77,6 +80,7 @@ typedef struct {
     ngx_uint_t                       ssl_verify;
     ngx_http_ffi_client_ffi_str_t    ssl_server_name;
     ngx_http_ffi_client_ffi_str_t    ssl_trusted_certificate;
+    ngx_uint_t                       ssl_session_reuse;
 } ngx_http_ffi_client_ffi_connect_t;
 
 
@@ -214,6 +218,10 @@ struct ngx_http_ffi_client_ssl_ctx_s {
     unsigned                          verify:1;
     ngx_ssl_t                        *ssl;
 };
+
+/* the worker's TLS session cache; its layout is private to the session file */
+typedef struct ngx_http_ffi_client_ssl_session_cache_s
+    ngx_http_ffi_client_ssl_session_cache_t;
 #endif
 
 
@@ -222,6 +230,8 @@ typedef struct {
     ngx_rbtree_node_t                 sentinel;
 #if (NGX_SSL)
     ngx_http_ffi_client_ssl_ctx_t    *ssl_ctxs;
+    ngx_http_ffi_client_ssl_session_cache_t
+                                     *ssl_sessions;
 #endif
 } ngx_http_ffi_client_main_conf_t;
 
@@ -302,6 +312,7 @@ struct ngx_http_ffi_client_op_s {
     ngx_str_t                            ssl_trusted_certificate;
     unsigned                             ssl:1;
     unsigned                             ssl_verify:1;
+    unsigned                             ssl_session_reuse:1;
 #endif
 };
 
@@ -358,6 +369,20 @@ ngx_int_t ngx_http_ffi_client_response_eof(ngx_pool_t *pool,
 /* whole-token lookup in a comma-separated list header such as Connection */
 ngx_uint_t ngx_http_ffi_client_has_token(ngx_str_t *value, const char *token,
     size_t len);
+
+#if (NGX_SSL)
+/*
+ * TLS session resumption. The cache holds one session per TLS peer and lives
+ * for the worker; enable() arms an SSL_CTX to report new sessions, offer()
+ * hands the cached one to a fresh connection, and commit() publishes the
+ * session of a handshake this client accepted.
+ */
+ngx_int_t ngx_http_ffi_client_ssl_session_cache_enable(ngx_ssl_t *ssl,
+    ngx_log_t *log);
+ngx_int_t ngx_http_ffi_client_ssl_session_offer(ngx_http_ffi_client_op_t *op,
+    ngx_connection_t *c);
+void ngx_http_ffi_client_ssl_session_commit(ngx_connection_t *c);
+#endif
 
 ngx_int_t ngx_http_ffi_client_keepalive_bind(ngx_http_request_t *r,
     ngx_http_ffi_client_op_t *op, ngx_http_ffi_client_ffi_req_t *req,

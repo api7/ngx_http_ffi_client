@@ -60,6 +60,7 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         uintptr_t ssl_verify;
         ngx_http_ffi_client_ffi_str_t ssl_server_name;
         ngx_http_ffi_client_ffi_str_t ssl_trusted_certificate;
+        uintptr_t ssl_session_reuse;
     } ngx_http_ffi_client_ffi_req_t;
 
     typedef struct {
@@ -91,6 +92,7 @@ if not pcall(ffi.typeof, "ngx_http_ffi_client_ffi_req_t") then
         uintptr_t ssl_verify;
         ngx_http_ffi_client_ffi_str_t ssl_server_name;
         ngx_http_ffi_client_ffi_str_t ssl_trusted_certificate;
+        uintptr_t ssl_session_reuse;
     } ngx_http_ffi_client_ffi_connect_t;
 
     typedef struct {
@@ -327,6 +329,9 @@ function _M.request_uri(opts)
     -- verify defaults on for https; pass ssl_verify = false to disable
     local ssl_verify = ssl and opts.ssl_verify ~= false
 
+    -- resumption defaults on; pass ssl_session_reuse = false to disable
+    local ssl_session_reuse = ssl and opts.ssl_session_reuse ~= false
+
     if opts.ssl_server_name ~= nil
        and (type(opts.ssl_server_name) ~= "string"
             or opts.ssl_server_name == "")
@@ -412,6 +417,7 @@ function _M.request_uri(opts)
     req.read_timeout = tonumber(opts.read_timeout or opts.timeout or 60000)
     req.ssl = ssl and 1 or 0
     req.ssl_verify = ssl_verify and 1 or 0
+    req.ssl_session_reuse = ssl_session_reuse and 1 or 0
 
     local err = get_string_buf(ERR_BUF_SIZE)
     local errlen = get_size_ptr()
@@ -543,7 +549,7 @@ end
 
 
 -- connect{ scheme, host, port, pool, pool_size, ssl_verify, ssl_server_name,
---          ssl_trusted_certificate } or connect(host, port)
+--          ssl_trusted_certificate, ssl_session_reuse } or connect(host, port)
 function client.connect(self, opts, port_arg)
     local r = get_request()
     if not r then
@@ -552,6 +558,7 @@ function client.connect(self, opts, port_arg)
 
     local host, port, scheme, pool, pool_size
     local ssl_verify, ssl_server_name, ssl_trusted_certificate
+    local ssl_session_reuse
 
     if type(opts) == "table" then
         host = opts.host
@@ -562,6 +569,7 @@ function client.connect(self, opts, port_arg)
         ssl_verify = opts.ssl_verify
         ssl_server_name = opts.ssl_server_name
         ssl_trusted_certificate = opts.ssl_trusted_certificate
+        ssl_session_reuse = opts.ssl_session_reuse
 
     else
         host = opts
@@ -586,6 +594,9 @@ function client.connect(self, opts, port_arg)
 
     -- verify defaults on for https; pass ssl_verify = false to disable
     ssl_verify = ssl and ssl_verify ~= false
+
+    -- resumption defaults on; pass ssl_session_reuse = false to disable
+    ssl_session_reuse = ssl and ssl_session_reuse ~= false
 
     if ssl_server_name ~= nil
        and (type(ssl_server_name) ~= "string" or ssl_server_name == "")
@@ -643,6 +654,7 @@ function client.connect(self, opts, port_arg)
     cp.keepalive_idle_timeout = 0
     cp.ssl = ssl and 1 or 0
     cp.ssl_verify = ssl_verify and 1 or 0
+    cp.ssl_session_reuse = ssl_session_reuse and 1 or 0
 
     local err, errlen = new_err_buf()
     local rc = c_connect(r, self._op, cp, err, errlen)

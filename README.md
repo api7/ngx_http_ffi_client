@@ -103,6 +103,32 @@ The one-shot `request_uri{ keepalive = { pool, pool_size, idle_timeout } }`
 resolves the same defaults and shares the same pools, so a pool name reaches the
 same connections from either entry point.
 
+### TLS session resumption
+
+An https connection offers the server the session from an earlier handshake with
+the same peer, so it costs one round trip instead of two and no certificate work.
+Both entry points do it, and both take `ssl_session_reuse = false` to turn it
+off, the way nginx's `proxy_ssl_session_reuse` does. It matters most where the
+connection pool cannot help: a fresh connection per request, which is what the
+`tlsshort` benchmark shape measures.
+
+- The cache holds one session per TLS peer and lives for the worker, up to `256`
+  peers, evicting the least recently used. A session past its expiry is dropped
+  rather than offered.
+- The cache key is the verify mode, the peer address, the SNI and the trusted CA
+  — every input the original handshake was judged on. A resumed handshake skips
+  the certificate exchange and answers with the verify result recorded in the
+  session, so a session established with verification off is never offered to a
+  request that asked for it on, and one trusting a given CA is never offered to a
+  request naming another.
+- Only a handshake this client accepted leaves a session behind. A peer rejected
+  for a bad chain or a name mismatch leaves nothing for the next request.
+- TLS 1.3 resumes as well as TLS 1.2: its tickets arrive after the handshake and
+  are picked up from the session callback rather than at handshake completion.
+- A resumed handshake does not re-send the peer certificate. Nothing in this
+  client reads it outside the verify path, which reads it from the session, but
+  it is the observable difference to know about.
+
 ## Project status
 
 This project is at an **early implementation stage**. The protocol direction is

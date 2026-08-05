@@ -26,6 +26,7 @@ ngx_http_ffi_client_srcs="\
     $ngx_addon_dir/src/ngx_http_ffi_client_module.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_lua.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_keepalive.c \
+    $ngx_addon_dir/src/ngx_http_ffi_client_ssl_session.c \
     $ngx_addon_dir/src/ngx_http_ffi_client_request.c"
 
 if [ "$ngx_http_ffi_client_use_llhttp" = "1" ]; then
