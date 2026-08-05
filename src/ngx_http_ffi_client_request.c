@@ -60,7 +60,10 @@ static ngx_int_t ngx_http_ffi_client_handle_read_wait(
     ngx_http_ffi_client_op_t *op);
 #if (NGX_SSL)
 static ngx_ssl_t *ngx_http_ffi_client_ssl_ctx(
-    ngx_http_ffi_client_main_conf_t *fmcf, ngx_str_t *ca, ngx_log_t *log);
+    ngx_http_ffi_client_main_conf_t *fmcf, ngx_str_t *ca, ngx_uint_t verify,
+    ngx_log_t *log);
+static ngx_int_t ngx_http_ffi_client_ssl_default_store(X509_STORE *store,
+    ngx_log_t *log);
 static ngx_int_t ngx_http_ffi_client_ssl_init_connection(
     ngx_http_ffi_client_op_t *op);
 static ngx_uint_t ngx_http_ffi_client_name_is_ip(ngx_str_t *name);
@@ -1538,22 +1541,115 @@ ngx_http_ffi_client_handle_read_wait(ngx_http_ffi_client_op_t *op)
 #if (NGX_SSL)
 
 /*
+ * Load the platform trust store into `store`.
+ *
+ * This is what SSL_CTX_set_default_verify_paths() would do, except that it
+ * registers both locations as X509_FILETYPE_PEM rather than
+ * X509_FILETYPE_DEFAULT. The filetype is not cosmetic: with DEFAULT, OpenSSL
+ * enumerates the whole hashed CA directory (a getdents64 sweep of every entry
+ * in /etc/ssl/certs) on *each* handshake, instead of opening the single
+ * <hash>.N file the lookup actually needs. On a fresh-connection-per-request
+ * workload that directory walk cost ~11% of the worker's CPU.
+ *
+ * The SSL_CERT_FILE / SSL_CERT_DIR environment overrides are honoured the same
+ * way OpenSSL honours them, so behaviour is unchanged apart from the cost.
+ *
+ * Returns NGX_OK if either location loaded; a trust store with neither is
+ * unusable and would fail every verify.
+ */
+static ngx_int_t
+ngx_http_ffi_client_ssl_default_store(X509_STORE *store, ngx_log_t *log)
+{
+    const char     *file, *dir;
+    ngx_uint_t      loaded;
+    X509_LOOKUP    *lookup;
+
+    loaded = 0;
+
+    file = getenv(X509_get_default_cert_file_env());
+    if (file == NULL) {
+        file = X509_get_default_cert_file();
+    }
+
+    dir = getenv(X509_get_default_cert_dir_env());
+    if (dir == NULL) {
+        dir = X509_get_default_cert_dir();
+    }
+
+    lookup = X509_STORE_add_lookup(store, X509_LOOKUP_file());
+    if (lookup == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "X509_STORE_add_lookup(X509_LOOKUP_file) failed");
+        return NGX_ERROR;
+    }
+
+    if (X509_LOOKUP_load_file(lookup, file, X509_FILETYPE_PEM) == 1) {
+        loaded = 1;
+
+    } else {
+        /* not fatal on its own: the hashed directory may still cover it */
+        ERR_clear_error();
+    }
+
+    lookup = X509_STORE_add_lookup(store, X509_LOOKUP_hash_dir());
+    if (lookup == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "X509_STORE_add_lookup(X509_LOOKUP_hash_dir) failed");
+        return NGX_ERROR;
+    }
+
+    if (X509_LOOKUP_add_dir(lookup, dir, X509_FILETYPE_PEM) == 1) {
+        loaded = 1;
+
+    } else {
+        ERR_clear_error();
+    }
+
+    if (!loaded) {
+        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                      "failed to load the default trust store from \"%s\""
+                      " or \"%s\"", file, dir);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+/*
  * Lazily build one client SSL_CTX per distinct trust config, cached on
  * main_conf. `ca` is an optional trusted-CA file path (empty = system store
- * only). Returns NULL on failure without caching a half-built context.
+ * only). `verify` says whether this context will ever be asked to check a
+ * chain; when it is off no trust store is loaded at all, because OpenSSL
+ * verifies the chain during every handshake regardless of the verify mode and
+ * ngx_http_ffi_client_ssl_handshake_handler() only reads the result when the
+ * caller asked for it, so with verify off `ca` is folded away and every such
+ * caller shares one context. Returns NULL on failure without caching a
+ * half-built context.
  */
 static ngx_ssl_t *
 ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
-    ngx_str_t *ca, ngx_log_t *log)
+    ngx_str_t *ca, ngx_uint_t verify, ngx_log_t *log)
 {
     u_char                         *path;
+    ngx_str_t                       none = ngx_null_string;
     ngx_ssl_t                      *ssl;
     ngx_pool_cleanup_t             *cln;
     ngx_http_ffi_client_ssl_ctx_t  *node;
 
+    /* Nothing below reads `ca` unless `verify` is set, so a verify-off context
+     * is the same whatever CA the caller named. Fold it here, ahead of both the
+     * lookup and the cache node, so the two always agree: normalising only one
+     * of them would miss every time and leak a context per request. This must
+     * move if `ca` ever gains meaning with verify off. */
+    if (!verify) {
+        ca = &none;
+    }
+
     for (node = fmcf->ssl_ctxs; node != NULL; node = node->next) {
         /* guard memcmp: NULL pointers with len 0 are UB */
-        if (node->ca.len == ca->len
+        if (node->verify == (verify ? 1u : 0u)
+            && node->ca.len == ca->len
             && (ca->len == 0
                 || ngx_memcmp(node->ca.data, ca->data, ca->len) == 0))
         {
@@ -1575,32 +1671,39 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
     /* verify mode stays NONE so the handshake completes and we inspect the
      * result ourselves. An unusable trust store is a hard init failure: don't
      * cache a context that would fail every verify-on request. */
-    if (SSL_CTX_set_default_verify_paths(ssl->ctx) == 0) {
-        ngx_ssl_error(NGX_LOG_ALERT, log, 0,
-                      "SSL_CTX_set_default_verify_paths() failed");
-        ngx_ssl_cleanup_ctx(ssl);
-        return NULL;
-    }
-
-    if (ca->len) {
-        path = ngx_pnalloc(ngx_cycle->pool, ca->len + 1);
-        if (path == NULL) {
+    if (verify) {
+        if (ngx_http_ffi_client_ssl_default_store(
+                SSL_CTX_get_cert_store(ssl->ctx), log) != NGX_OK)
+        {
             ngx_ssl_cleanup_ctx(ssl);
             return NULL;
         }
 
-        ngx_memcpy(path, ca->data, ca->len);
-        path[ca->len] = '\0';
+        if (ca->len) {
+            path = ngx_pnalloc(ngx_cycle->pool, ca->len + 1);
+            if (path == NULL) {
+                ngx_ssl_cleanup_ctx(ssl);
+                return NULL;
+            }
 
-        if (SSL_CTX_load_verify_locations(ssl->ctx, (char *) path, NULL) == 0) {
-            ngx_ssl_error(NGX_LOG_ALERT, log, 0,
-                          "SSL_CTX_load_verify_locations(\"%s\") failed", path);
-            ngx_ssl_cleanup_ctx(ssl);
-            return NULL;
+            ngx_memcpy(path, ca->data, ca->len);
+            path[ca->len] = '\0';
+
+            /* load_verify_locations registers PEM, not DEFAULT, so it does not
+             * pay the per-handshake directory walk described above */
+            if (SSL_CTX_load_verify_locations(ssl->ctx, (char *) path, NULL)
+                == 0)
+            {
+                ngx_ssl_error(NGX_LOG_ALERT, log, 0,
+                              "SSL_CTX_load_verify_locations(\"%s\") failed",
+                              path);
+                ngx_ssl_cleanup_ctx(ssl);
+                return NULL;
+            }
         }
-    }
 
-    SSL_CTX_set_verify_depth(ssl->ctx, 100);
+        SSL_CTX_set_verify_depth(ssl->ctx, 100);
+    }
 
     /* build the cache node before registering cleanup so an alloc failure
      * frees the context instead of orphaning it until worker exit */
@@ -1611,6 +1714,7 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
     }
 
     node->ssl = ssl;
+    node->verify = verify ? 1 : 0;
     node->ca.len = ca->len;
     if (ca->len) {
         node->ca.data = ngx_pnalloc(ngx_cycle->pool, ca->len);
@@ -1740,7 +1844,7 @@ ngx_http_ffi_client_ssl_init_connection(ngx_http_ffi_client_op_t *op)
     fmcf = ngx_http_get_module_main_conf(op->r, ngx_http_ffi_client_module);
 
     ssl = ngx_http_ffi_client_ssl_ctx(fmcf, &op->ssl_trusted_certificate,
-                                      c->log);
+                                      op->ssl_verify, c->log);
     if (ssl == NULL) {
         ngx_http_ffi_client_finalize(op, NGX_ERROR, "failed to init TLS");
         return NGX_ERROR;
