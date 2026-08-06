@@ -13,7 +13,6 @@ static ngx_int_t ngx_http_ffi_client_set_op_err(ngx_http_ffi_client_op_t *op,
     const char *msg);
 static ngx_int_t ngx_http_ffi_client_set_op_errno(ngx_http_ffi_client_op_t *op,
     ngx_err_t err, const char *fallback);
-static ngx_uint_t ngx_http_ffi_client_has_crlf(u_char *data, size_t len);
 static ngx_uint_t ngx_http_ffi_client_header_is_reserved(
     ngx_http_ffi_client_ffi_str_t *key);
 static ngx_uint_t ngx_http_ffi_client_method_is_head(
@@ -398,21 +397,6 @@ ngx_http_ffi_client_set_op_errno(ngx_http_ffi_client_op_t *op, ngx_err_t err,
 }
 
 
-static ngx_uint_t
-ngx_http_ffi_client_has_crlf(u_char *data, size_t len)
-{
-    size_t  i;
-
-    for (i = 0; i < len; i++) {
-        if (data[i] == CR || data[i] == LF) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-
 /* one character of an RFC 9110 token */
 static ngx_uint_t
 ngx_http_ffi_client_is_tchar(u_char c)
@@ -669,10 +653,6 @@ ngx_http_ffi_client_build_request(ngx_http_request_t *r,
         || !ngx_http_ffi_client_is_vchar(req->path.data, req->path.len))
     {
         return ngx_http_ffi_client_set_err(err, errlen, "invalid path");
-    }
-
-    if (ngx_http_ffi_client_has_crlf(req->body.data, req->body.len)) {
-        return ngx_http_ffi_client_set_err(err, errlen, "invalid request");
     }
 
     host_value = *host;

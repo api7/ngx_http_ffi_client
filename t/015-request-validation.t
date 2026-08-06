@@ -5,8 +5,8 @@
 use Test::Nginx::Socket -Base;
 
 repeat_each(1);
-# the one block with a tcp_query checks the request bytes on top of the three
-plan tests => repeat_each() * (blocks() * 3 + 1);
+# the two blocks with a tcp_query check the request bytes on top of the three
+plan tests => repeat_each() * (blocks() * 3 + 2);
 
 our $HttpConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
@@ -298,5 +298,38 @@ invalid request header
 GET /t
 --- response_body
 invalid host
+--- no_error_log
+[error]
+
+
+
+=== TEST 10: a body containing CR and LF is sent verbatim
+--- http_config eval: $::HttpConfig
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "127.0.0.1",
+                port = 12851,
+                method = "POST",
+                path = "/",
+                body = "{\n  \"model\": \"m\"\r\n}",
+                timeout = 1000,
+            })
+
+            ngx.say(res and res.body or err)
+        }
+    }
+--- tcp_listen: 12851
+--- tcp_query eval
+"POST / HTTP/1.1\r\nHost: 127.0.0.1:12851\r\nConnection: close\r\n"
+. "Content-Length: 19\r\n\r\n{\n  \"model\": \"m\"\r\n}"
+--- tcp_reply eval
+"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+--- request
+GET /t
+--- response_body
+ok
 --- no_error_log
 [error]
