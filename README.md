@@ -106,11 +106,12 @@ same connections from either entry point.
 ### TLS session resumption
 
 An https connection offers the server the session from an earlier handshake with
-the same peer, so it costs one round trip instead of two and no certificate work.
-Both entry points do it, and both take `ssl_session_reuse = false` to turn it
-off, the way nginx's `proxy_ssl_session_reuse` does. It matters most where the
-connection pool cannot help: a fresh connection per request, which is what the
-`tlsshort` benchmark shape measures.
+the same peer. A resumed handshake sends no certificate and does no signature or
+key-exchange work, and on TLS 1.2 it also saves a round trip. Both entry points
+do it, and both take `ssl_session_reuse = false` to turn it off, the way nginx's
+`proxy_ssl_session_reuse` does. It matters most where the connection pool cannot
+help: a fresh connection per request, which is what the `tlsshort` benchmark
+shape measures.
 
 - The cache holds one session per TLS peer and lives for the worker, up to `256`
   peers, evicting the least recently used. A session past its expiry is dropped

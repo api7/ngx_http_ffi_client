@@ -371,7 +371,7 @@ one.test r
         content_by_lua_block {
             local client = require "resty.ngx_http_ffi_client"
 
-            -- one entry per SNI, so 260 peers overrun a cache that holds 256
+            -- one entry per SNI, so the peer count is the cache pressure
             local function get(name)
                 local res, err = client.request_uri({
                     scheme = "https",
@@ -392,18 +392,29 @@ one.test r
                 return res.headers["X-Reused"]
             end
 
-            for i = 1, 260 do
+            -- fill the cache exactly: h1 is now its least recently used peer
+            for i = 1, 256 do
                 if not get("h" .. i .. ".test") then return end
             end
 
-            ngx.say("first ", get("h1.test"))
-            ngx.say("last ", get("h260.test"))
+            -- h1 still resumes, and using it makes h2 the least recently used
+            ngx.say("h1 ", get("h1.test"))
+
+            -- one peer past the cap, so exactly one entry has to go
+            ngx.say("h257 ", get("h257.test"))
+
+            -- the one that went is h2, not the h1 an unpromoted cache would
+            -- have dropped
+            ngx.say("h1 ", get("h1.test"))
+            ngx.say("h2 ", get("h2.test"))
         }
     }
 --- request
 GET /t
 --- response_body
-first .
-last r
+h1 r
+h257 .
+h1 r
+h2 .
 --- no_error_log
 [error]

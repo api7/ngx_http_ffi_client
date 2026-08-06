@@ -1871,12 +1871,13 @@ ngx_http_ffi_client_ssl_init_connection(ngx_http_ffi_client_op_t *op)
         return NGX_ERROR;
     }
 
+    /* resumption is an optimization, and what it fails back to is the full
+     * handshake this connection would have done anyway */
     if (op->ssl_session_reuse
         && ngx_http_ffi_client_ssl_session_offer(op, c) != NGX_OK)
     {
-        ngx_http_ffi_client_finalize(op, NGX_ERROR,
-                                     "failed to set up TLS session reuse");
-        return NGX_ERROR;
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "ffi client TLS session reuse unavailable");
     }
 
     op->state = NGX_HTTP_FFI_CLIENT_HANDSHAKING;
