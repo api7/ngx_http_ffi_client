@@ -218,3 +218,10 @@ these local runs. See
 reproduction notes, and detailed measurements.
 
 Design notes and implementation plans used during development live under `docs/superpowers/` and are intentionally ignored by git.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+The vendored llhttp parser under `src/llhttp/` keeps its own MIT license, see
+[src/llhttp/LICENSE-MIT](src/llhttp/LICENSE-MIT).
