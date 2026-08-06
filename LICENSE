@@ -199,3 +199,20 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+=======================================================================
+ngx_http_ffi_client Subcomponents:
+
+This project contains subcomponents with separate copyright notices and
+license terms. Your use of the source code for these subcomponents is
+subject to the terms and conditions of the following licenses.
+
+========================================================================
+MIT licenses
+========================================================================
+
+The following components are provided under the MIT License. See project
+link for details.
+
+   src/llhttp/ from nodejs/llhttp: https://github.com/nodejs/llhttp MIT
+   (vendored copy, full license text in src/llhttp/LICENSE-MIT)
