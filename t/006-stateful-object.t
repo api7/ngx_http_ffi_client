@@ -1,8 +1,7 @@
 use Test::Nginx::Socket -Base;
 
 repeat_each(1);
-# the connect-failure block checks the response body only
-plan tests => repeat_each() * (blocks() * 3 - 1);
+plan tests => repeat_each() * (blocks() * 3);
 
 our $HttpConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
@@ -414,6 +413,8 @@ not connected
 --- request
 GET /t
 --- response_body_like: failed: (connect failed|connection refused|Connection refused)
+--- no_error_log
+[error]
 
 
 

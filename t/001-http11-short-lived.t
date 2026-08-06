@@ -1,7 +1,7 @@
 use Test::Nginx::Socket -Base;
 
 repeat_each(1);
-plan tests => repeat_each() * (blocks() * 3 - 1);
+plan tests => repeat_each() * (blocks() * 3);
 
 our $UseLLHTTP = !defined($ENV{NGX_HTTP_FFI_CLIENT_USE_LLHTTP})
     || $ENV{NGX_HTTP_FFI_CLIENT_USE_LLHTTP} eq ''
@@ -212,3 +212,5 @@ chunked
 --- request
 GET /t
 --- response_body_like: (connect failed|connection refused|Connection refused)
+--- no_error_log
+[error]
