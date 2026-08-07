@@ -287,7 +287,9 @@ ngx_http_ffi_client_do_connect(ngx_http_ffi_client_op_t *op)
 
     op->peer.get = ngx_http_ffi_client_get_peer;
     op->peer.log = op->r->connection->log;
-    op->peer.log_error = NGX_ERROR_ERR;
+    /* the error is returned to the Lua caller; log at info like a cosocket
+     * under lua_socket_log_errors off */
+    op->peer.log_error = NGX_ERROR_INFO;
 
     rc = ngx_event_connect_peer(&op->peer);
 
