@@ -38,7 +38,11 @@ if [ "$ngx_http_ffi_client_use_llhttp" = "1" ]; then
 
     echo "ngx_http_ffi_client: building $ngx_http_ffi_client_llhttp_lib"
     for ngx_http_ffi_client_unit in llhttp api http; do
-        "${CC:-cc}" -O2 -fPIC -I "$ngx_http_ffi_client_llhttp_dir" \
+        # CC is unquoted on purpose: nginx's own auto/ scripts treat it as a
+        # word list, and a build that sets CC to more than a bare program
+        # name -- "gcc -fsanitize=address ...", a ccache or cross-compile
+        # wrapper -- would otherwise be looked up as one long filename.
+        ${CC:-cc} -O2 -fPIC -I "$ngx_http_ffi_client_llhttp_dir" \
             -c "$ngx_http_ffi_client_llhttp_dir/$ngx_http_ffi_client_unit.c" \
             -o "$ngx_http_ffi_client_llhttp_dir/$ngx_http_ffi_client_unit.o" \
             || exit 1
