@@ -92,9 +92,11 @@ With `ssl_verify` on, the peer certificate is checked against the first of:
    every SSL cosocket in the process verifies against
 3. OpenSSL's default verify paths
 
-Tier 2 is what makes the client a drop-in for `lua-resty-http` under APISIX,
-which always sets the directive; cosockets have no per-call CA option, so tier 1
-is an extension.
+The selected tier is the whole trust store: a chain must verify against it
+alone, exactly as a cosocket verifies against `lua_ssl_trusted_certificate`
+alone. Tier 2 is what makes the client a drop-in for `lua-resty-http` under
+APISIX, which always sets the directive; cosockets have no per-call CA option,
+so tier 1 is an extension.
 
 ### Keepalive
 

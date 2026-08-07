@@ -80,6 +80,26 @@ dMEmcapTrGz0WTFrAnkMPOMo4haBswySqePfrG5oC/xa77Dw6/LOD8b1pmupeKvx
 YrErqu4suZWhAa1m2pblIxAM3CA3l5ZZR8rF4w0Iau1OoUHDEATOTYETiitKuvFp
 Ye/gbwb0N+OIZRCBROm7A70=
 -----END PRIVATE KEY-----
+>>> tls-copy.crt
+-----BEGIN CERTIFICATE-----
+MIIDKjCCAhKgAwIBAgIUMpoLE+76X2UdJn+TC1k80Qr6O0MwDQYJKoZIhvcNAQEL
+BQAwFTETMBEGA1UEAwwKdGVzdC5sb2NhbDAgFw0yNjA3MTUwODU2MDRaGA8yMTI2
+MDYyMTA4NTYwNFowFTETMBEGA1UEAwwKdGVzdC5sb2NhbDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAMWo0WdpxTqswzXDnhsRpqby32slAR4BmzjXECvo
+LHK1Oza+/8SCAo9r61HXl5fyy6cCll75MzEmZkLJy8vwmvCh5qTBBDt68eq6RbGH
+FRlCNhjup2KvsXoUWfmOQC72PMYKg/faY8RoV40P9x/W57JvT5WSCf6O3/anre8g
+ywokpH3QokPRdIEg3OE+OTAMcDV43mISXjWJWAtpJU71T/i0Iyxy5IBU01qXAjEe
+WIy8fQLzPoK4WqiHH6jII9bB6ebDrWl5SW2CmrStb5lnMuf8OqXXomXBzTcfC3cu
+CAREN2a3uZiAPryG4paTBD/3+dmyLDmjEmeFV2CQCSJ9bQkCAwEAAaNwMG4wHQYD
+VR0OBBYEFIZZdTC230/zMtPUjW1CpizXxWGGMB8GA1UdIwQYMBaAFIZZdTC230/z
+MtPUjW1CpizXxWGGMA8GA1UdEwEB/wQFMAMBAf8wGwYDVR0RBBQwEoIKdGVzdC5s
+b2NhbIcEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAYv+q+iaGoJG1qStGFk/Ojhpa
+aLXti7QV53aCaUpNbiKiCxtIC1ZqpaQAW+G5eM2dWC+7TCrqcMJuJjjp5c9mwolR
+WHMqinfNUe/LCa3DsJvqYEkr1Dmy+iPabfP6Ni3UnWMehehTvX86jd4GjR7mTj6/
+PC2D6x5gy+SFQSh+OMvtMkmYM91s21UIds5z9PhXDVzolH3kP3zaqtu646F1btIK
+g5sdzjzunwEd5Av6hzaqYNu/ysbz6NiVcTOj8cA3RaktwvgBmWE2mRim2BO5bAXf
+JE9Vloa+pp9bLzcwlTaU2zIZb2SadrMbNaNdh8lJ/iX5H3pSaNODNTThmw6BWA==
+-----END CERTIFICATE-----
 >>> wrong.crt
 -----BEGIN CERTIFICATE-----
 MIIDJzCCAg+gAwIBAgIUVkMf7Y4yo13uKrrz3MPUe3qLKPkwDQYJKoZIhvcNAQEL
@@ -338,18 +358,24 @@ secure
         }
     }
 
-    location /conn-verify-off {
+    location /conn-b {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls-copy.crt;
         content_by_lua_block {
             local http = require "resty.ngx_http_ffi_client"
             local httpc = http.new()
             httpc:set_timeout(2000)
 
-            assert(httpc:connect({
+            local ok, err = httpc:connect({
                 scheme = "https",
                 host = "127.0.0.1",
                 port = 12699,
-                ssl_verify = false,
-            }))
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.say("connect: ", err)
+                return
+            end
 
             local reused = httpc:get_reused_times()
             local res = assert(httpc:request({ path = "/",
@@ -362,10 +388,12 @@ secure
 
     location /t {
         content_by_lua_block {
-            -- same host and port throughout; only the trust config differs.
-            -- the verified pool and the verify-off pool must never mix.
+            -- same host, port and verify mode throughout; the two locations
+            -- differ only in the directive's CA path (equal file content), so
+            -- a shared pool here would mean the resolved CA is missing from
+            -- the keepalive key
             local a1 = ngx.location.capture("/conn")
-            local b1 = ngx.location.capture("/conn-verify-off")
+            local b1 = ngx.location.capture("/conn-b")
             local a2 = ngx.location.capture("/conn")
             ngx.print(a1.body, b1.body, a2.body)
         }

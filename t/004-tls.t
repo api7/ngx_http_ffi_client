@@ -544,3 +544,79 @@ GET /t
 --- response_body_like: TLS certificate verify failed
 --- no_error_log
 [error]
+
+
+
+=== TEST 13: a selected CA is exclusive, defaults do not rescue it
+--- main_config
+env SSL_CERT_FILE=$TEST_NGINX_SERVER_ROOT/html/tls.crt;
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/wrong.crt;
+        content_by_lua_block {
+            -- SSL_CERT_FILE points the default store at the server's own
+            -- cert, so only CA exclusivity can make this fail
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+
+            if res then
+                ngx.status = 500
+                ngx.say("unexpected success")
+                return
+            end
+
+            ngx.say(err)
+        }
+    }
+--- request
+GET /t
+--- response_body_like: TLS certificate verify failed
+--- no_error_log
+[error]
+
+
+
+=== TEST 14: with no CA selected the default store still applies
+--- main_config
+env SSL_CERT_FILE=$TEST_NGINX_SERVER_ROOT/html/tls.crt;
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12399,
+                method = "GET",
+                path = "/",
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+
+            if not res then
+                ngx.status = 500
+                ngx.say(err)
+                return
+            end
+
+            ngx.say(res.status)
+        }
+    }
+--- request
+GET /t
+--- response_body
+200
+--- no_error_log
+[error]

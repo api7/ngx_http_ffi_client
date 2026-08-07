@@ -1653,8 +1653,9 @@ ngx_http_ffi_client_ssl_default_store(X509_STORE *store, ngx_log_t *log)
 
 /*
  * Lazily build one client SSL_CTX per distinct trust config, cached on
- * main_conf. `ca` is an optional trusted-CA file path (empty = system store
- * only). `verify` says whether this context will ever be asked to check a
+ * main_conf. `ca` is an optional trusted-CA file path; when set it is the
+ * whole trust store, when empty the system store is used instead. `verify`
+ * says whether this context will ever be asked to check a
  * chain; when it is off no trust store is loaded at all, because OpenSSL
  * verifies the chain during every handshake regardless of the verify mode and
  * ngx_http_ffi_client_ssl_handshake_handler() only reads the result when the
@@ -1705,15 +1706,13 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
 
     /* verify mode stays NONE so the handshake completes and we inspect the
      * result ourselves. An unusable trust store is a hard init failure: don't
-     * cache a context that would fail every verify-on request. */
+     * cache a context that would fail every verify-on request.
+     *
+     * A selected CA is the exclusive trust store, as it is for cosockets: the
+     * default store is loaded only when no CA was chosen. Stacking the two
+     * would let a chain the platform trusts pass verification against a
+     * context whose caller pinned a different CA. */
     if (verify) {
-        if (ngx_http_ffi_client_ssl_default_store(
-                SSL_CTX_get_cert_store(ssl->ctx), log) != NGX_OK)
-        {
-            ngx_ssl_cleanup_ctx(ssl);
-            return NULL;
-        }
-
         if (ca->len) {
             path = ngx_pnalloc(ngx_cycle->pool, ca->len + 1);
             if (path == NULL) {
@@ -1735,6 +1734,12 @@ ngx_http_ffi_client_ssl_ctx(ngx_http_ffi_client_main_conf_t *fmcf,
                 ngx_ssl_cleanup_ctx(ssl);
                 return NULL;
             }
+
+        } else if (ngx_http_ffi_client_ssl_default_store(
+                       SSL_CTX_get_cert_store(ssl->ctx), log) != NGX_OK)
+        {
+            ngx_ssl_cleanup_ctx(ssl);
+            return NULL;
         }
 
         SSL_CTX_set_verify_depth(ssl->ctx, 100);
