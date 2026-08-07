@@ -80,6 +80,26 @@ dMEmcapTrGz0WTFrAnkMPOMo4haBswySqePfrG5oC/xa77Dw6/LOD8b1pmupeKvx
 YrErqu4suZWhAa1m2pblIxAM3CA3l5ZZR8rF4w0Iau1OoUHDEATOTYETiitKuvFp
 Ye/gbwb0N+OIZRCBROm7A70=
 -----END PRIVATE KEY-----
+>>> wrong.crt
+-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUVkMf7Y4yo13uKrrz3MPUe3qLKPkwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLd3JvbmcubG9jYWwwIBcNMjYwODA3MDYxNjQ1WhgPMjEy
+NjA3MTQwNjE2NDVaMBYxFDASBgNVBAMMC3dyb25nLmxvY2FsMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlZppw3OrHry4fDzw/uzNryds+5YZnLR+Y5KG
+Z7h4/6vnTQa0w4GxMOE4NsMPtFA7HrhK4x05GhEAnMvgZRfDxmm4JimMDXZA8lls
+LOm0I6rNB/cJfvLTC4Ji+wrBRcEtasWIlOuoyY858wmcPZ8xtNa14Hxp7fnKldXs
+2MXwXq5f7SPC312r1cNj8dcf3YefdCeM87L+zSUouce8fijjQrzhVqV86Mq6+EGv
+sEiIQPCndof/Wmv/q7wjKbK6dcxu6TGdBUxBDI1Bwan0pf/IKolhumfr3hr4WOHh
+AtzW7uy1+bo3FlijX/9JY09sp6myawPQH+woHnIhBrn9+L4XHQIDAQABo2swaTAd
+BgNVHQ4EFgQUP4znbTWXRvoBvfOmp57Un5V3Sp4wHwYDVR0jBBgwFoAUP4znbTWX
+RvoBvfOmp57Un5V3Sp4wDwYDVR0TAQH/BAUwAwEB/zAWBgNVHREEDzANggt3cm9u
+Zy5sb2NhbDANBgkqhkiG9w0BAQsFAAOCAQEACvczfhyiBJOzI/UDD6Ci5jQKQFe3
+rtu7YnutWRiBRm87bIiIn/GTYicNabMmUZJpkfeUfcBKBM0ujbap3dajMw/Oo8Gk
+G1ZGFdfBE7Tqwuev/WRAau58WpaNuMgfUD3UTZ6Ty7brPSK8ZMWKrzCuDs5693rl
+BbJ1fC0o2sZzk8TNECjn5GrVNlCVO997aio+QCdxnLasJxVkye09rpTZWRGYoMmg
+hqtQTw5xs0YQEVZH1gr58Ez7ENOC55KMQmjT94QohDJzQtUXBzIcsse6ZXR0Q9+7
+PAyKEbY2dhMATu+c4tkjKE8pOxIzF6SR+k9kjXBbUacAEwO8jCz/wjLjGg==
+-----END CERTIFICATE-----
 _EOC_
 
 no_long_string();
@@ -240,5 +260,121 @@ sliced=true
 GET /t
 --- response_body
 0,1,2
+--- no_error_log
+[error]
+
+
+
+=== TEST 5: connect verify falls back to lua_ssl_trusted_certificate
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls.crt;
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            local ok, err = httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.status = 500
+                ngx.say("connect: ", err)
+                return
+            end
+
+            local res = assert(httpc:request({ path = "/" }))
+
+            ngx.say(res.status)
+            ngx.print(res:read_body())
+            httpc:close()
+        }
+    }
+--- request
+GET /t
+--- response_body
+200
+secure
+--- no_error_log
+[error]
+
+
+
+=== TEST 6: locations with different directive CAs use different pools
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /conn {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls.crt;
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            local ok, err = httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.say("connect: ", err)
+                return
+            end
+
+            local reused = httpc:get_reused_times()
+            local res = assert(httpc:request({ path = "/",
+                                               preread_body = true }))
+            assert(res.status == 200)
+            httpc:set_keepalive()
+            ngx.say(reused)
+        }
+    }
+
+    location /conn-verify-off {
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            assert(httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = false,
+            }))
+
+            local reused = httpc:get_reused_times()
+            local res = assert(httpc:request({ path = "/",
+                                               preread_body = true }))
+            assert(res.status == 200)
+            httpc:set_keepalive()
+            ngx.say(reused)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            -- same host and port throughout; only the trust config differs.
+            -- the verified pool and the verify-off pool must never mix.
+            local a1 = ngx.location.capture("/conn")
+            local b1 = ngx.location.capture("/conn-verify-off")
+            local a2 = ngx.location.capture("/conn")
+            ngx.print(a1.body, b1.body, a2.body)
+        }
+    }
+--- request
+GET /t
+--- response_body
+0
+0
+1
 --- no_error_log
 [error]

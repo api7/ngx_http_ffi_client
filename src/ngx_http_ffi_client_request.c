@@ -2,6 +2,7 @@
 
 #if (NGX_SSL)
 #include <openssl/x509v3.h>
+#include <ngx_http_lua_common.h>
 #endif
 
 
@@ -59,6 +60,8 @@ static ngx_int_t ngx_http_ffi_client_handle_write_wait(
 static ngx_int_t ngx_http_ffi_client_handle_read_wait(
     ngx_http_ffi_client_op_t *op);
 #if (NGX_SSL)
+static void ngx_http_ffi_client_resolve_trusted_ca(ngx_http_request_t *r,
+    ngx_uint_t ssl_verify, ngx_http_ffi_client_ffi_str_t *ca);
 static ngx_ssl_t *ngx_http_ffi_client_ssl_ctx(
     ngx_http_ffi_client_main_conf_t *fmcf, ngx_str_t *ca, ngx_uint_t verify,
     ngx_log_t *log);
@@ -133,6 +136,9 @@ ngx_http_ffi_client_start(ngx_http_request_t *r,
 
     if (req->ssl) {
 #if (NGX_SSL)
+        ngx_http_ffi_client_resolve_trusted_ca(r, req->ssl_verify,
+                                               &req->ssl_trusted_certificate);
+
         op->ssl = 1;
         op->ssl_verify = req->ssl_verify ? 1 : 0;
         if (req->ssl_server_name.len) {
@@ -1541,6 +1547,35 @@ ngx_http_ffi_client_handle_read_wait(ngx_http_ffi_client_op_t *op)
 #if (NGX_SSL)
 
 /*
+ * With verify on and no caller CA, fall back to lua_ssl_trusted_certificate,
+ * the store every SSL cosocket in the process verifies against. Resolving it
+ * here, before the op copy and the keepalive key are built, keeps the SSL
+ * context cache and the connection pool keyed on the effective CA. The conf
+ * value lives in the cycle pool, so pointing at it is safe.
+ */
+static void
+ngx_http_ffi_client_resolve_trusted_ca(ngx_http_request_t *r,
+    ngx_uint_t ssl_verify, ngx_http_ffi_client_ffi_str_t *ca)
+{
+#if (NGX_HTTP_SSL)
+    ngx_http_lua_loc_conf_t  *llcf;
+
+    if (!ssl_verify || ca->len) {
+        return;
+    }
+
+    llcf = ngx_http_get_module_loc_conf(r, ngx_http_lua_module);
+    if (llcf == NULL || llcf->ssl_trusted_certificate.len == 0) {
+        return;
+    }
+
+    ca->data = llcf->ssl_trusted_certificate.data;
+    ca->len = llcf->ssl_trusted_certificate.len;
+#endif
+}
+
+
+/*
  * Load the platform trust store into `store`.
  *
  * This is what SSL_CTX_set_default_verify_paths() would do, except that it
@@ -2284,6 +2319,9 @@ ngx_http_ffi_client_ffi_connect(ngx_http_request_t *r,
 
     if (cp->ssl) {
 #if (NGX_SSL)
+        ngx_http_ffi_client_resolve_trusted_ca(r, cp->ssl_verify,
+                                               &cp->ssl_trusted_certificate);
+
         op->ssl = 1;
         op->ssl_verify = cp->ssl_verify ? 1 : 0;
 
