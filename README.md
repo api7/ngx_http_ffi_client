@@ -83,6 +83,21 @@ whitespace and control characters. A method of `GET /evil` or a header name of
 `X: injected` is refused before anything reaches the wire rather than writing a
 request line or a header the caller never asked for.
 
+### TLS trust
+
+With `ssl_verify` on, the peer certificate is checked against the first of:
+
+1. the `ssl_trusted_certificate` option, a PEM file path given per call
+2. `lua_ssl_trusted_certificate` from the nginx configuration, the same store
+   every SSL cosocket in the process verifies against
+3. OpenSSL's default verify paths
+
+The selected tier is the whole trust store: a chain must verify against it
+alone, exactly as a cosocket verifies against `lua_ssl_trusted_certificate`
+alone. Tier 2 is what makes the client a drop-in for `lua-resty-http` under
+APISIX, which always sets the directive; cosockets have no per-call CA option,
+so tier 1 is an extension.
+
 ### Keepalive
 
 `set_keepalive(timeout, pool_size)` follows the cosocket contract that

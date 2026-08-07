@@ -65,4 +65,6 @@ fi
 
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_http_ffi_client_srcs"
 
-CORE_INCS="$CORE_INCS $ngx_http_ffi_client_lua_module_dir/src/api"
+CORE_INCS="$CORE_INCS $ngx_http_ffi_client_lua_module_dir/src/api \
+    $ngx_http_ffi_client_lua_module_dir/src \
+    $ngx_addon_dir/src/compat"

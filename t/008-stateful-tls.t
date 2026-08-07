@@ -80,6 +80,46 @@ dMEmcapTrGz0WTFrAnkMPOMo4haBswySqePfrG5oC/xa77Dw6/LOD8b1pmupeKvx
 YrErqu4suZWhAa1m2pblIxAM3CA3l5ZZR8rF4w0Iau1OoUHDEATOTYETiitKuvFp
 Ye/gbwb0N+OIZRCBROm7A70=
 -----END PRIVATE KEY-----
+>>> tls-copy.crt
+-----BEGIN CERTIFICATE-----
+MIIDKjCCAhKgAwIBAgIUMpoLE+76X2UdJn+TC1k80Qr6O0MwDQYJKoZIhvcNAQEL
+BQAwFTETMBEGA1UEAwwKdGVzdC5sb2NhbDAgFw0yNjA3MTUwODU2MDRaGA8yMTI2
+MDYyMTA4NTYwNFowFTETMBEGA1UEAwwKdGVzdC5sb2NhbDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAMWo0WdpxTqswzXDnhsRpqby32slAR4BmzjXECvo
+LHK1Oza+/8SCAo9r61HXl5fyy6cCll75MzEmZkLJy8vwmvCh5qTBBDt68eq6RbGH
+FRlCNhjup2KvsXoUWfmOQC72PMYKg/faY8RoV40P9x/W57JvT5WSCf6O3/anre8g
+ywokpH3QokPRdIEg3OE+OTAMcDV43mISXjWJWAtpJU71T/i0Iyxy5IBU01qXAjEe
+WIy8fQLzPoK4WqiHH6jII9bB6ebDrWl5SW2CmrStb5lnMuf8OqXXomXBzTcfC3cu
+CAREN2a3uZiAPryG4paTBD/3+dmyLDmjEmeFV2CQCSJ9bQkCAwEAAaNwMG4wHQYD
+VR0OBBYEFIZZdTC230/zMtPUjW1CpizXxWGGMB8GA1UdIwQYMBaAFIZZdTC230/z
+MtPUjW1CpizXxWGGMA8GA1UdEwEB/wQFMAMBAf8wGwYDVR0RBBQwEoIKdGVzdC5s
+b2NhbIcEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAYv+q+iaGoJG1qStGFk/Ojhpa
+aLXti7QV53aCaUpNbiKiCxtIC1ZqpaQAW+G5eM2dWC+7TCrqcMJuJjjp5c9mwolR
+WHMqinfNUe/LCa3DsJvqYEkr1Dmy+iPabfP6Ni3UnWMehehTvX86jd4GjR7mTj6/
+PC2D6x5gy+SFQSh+OMvtMkmYM91s21UIds5z9PhXDVzolH3kP3zaqtu646F1btIK
+g5sdzjzunwEd5Av6hzaqYNu/ysbz6NiVcTOj8cA3RaktwvgBmWE2mRim2BO5bAXf
+JE9Vloa+pp9bLzcwlTaU2zIZb2SadrMbNaNdh8lJ/iX5H3pSaNODNTThmw6BWA==
+-----END CERTIFICATE-----
+>>> wrong.crt
+-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUVkMf7Y4yo13uKrrz3MPUe3qLKPkwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLd3JvbmcubG9jYWwwIBcNMjYwODA3MDYxNjQ1WhgPMjEy
+NjA3MTQwNjE2NDVaMBYxFDASBgNVBAMMC3dyb25nLmxvY2FsMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlZppw3OrHry4fDzw/uzNryds+5YZnLR+Y5KG
+Z7h4/6vnTQa0w4GxMOE4NsMPtFA7HrhK4x05GhEAnMvgZRfDxmm4JimMDXZA8lls
+LOm0I6rNB/cJfvLTC4Ji+wrBRcEtasWIlOuoyY858wmcPZ8xtNa14Hxp7fnKldXs
+2MXwXq5f7SPC312r1cNj8dcf3YefdCeM87L+zSUouce8fijjQrzhVqV86Mq6+EGv
+sEiIQPCndof/Wmv/q7wjKbK6dcxu6TGdBUxBDI1Bwan0pf/IKolhumfr3hr4WOHh
+AtzW7uy1+bo3FlijX/9JY09sp6myawPQH+woHnIhBrn9+L4XHQIDAQABo2swaTAd
+BgNVHQ4EFgQUP4znbTWXRvoBvfOmp57Un5V3Sp4wHwYDVR0jBBgwFoAUP4znbTWX
+RvoBvfOmp57Un5V3Sp4wDwYDVR0TAQH/BAUwAwEB/zAWBgNVHREEDzANggt3cm9u
+Zy5sb2NhbDANBgkqhkiG9w0BAQsFAAOCAQEACvczfhyiBJOzI/UDD6Ci5jQKQFe3
+rtu7YnutWRiBRm87bIiIn/GTYicNabMmUZJpkfeUfcBKBM0ujbap3dajMw/Oo8Gk
+G1ZGFdfBE7Tqwuev/WRAau58WpaNuMgfUD3UTZ6Ty7brPSK8ZMWKrzCuDs5693rl
+BbJ1fC0o2sZzk8TNECjn5GrVNlCVO997aio+QCdxnLasJxVkye09rpTZWRGYoMmg
+hqtQTw5xs0YQEVZH1gr58Ez7ENOC55KMQmjT94QohDJzQtUXBzIcsse6ZXR0Q9+7
+PAyKEbY2dhMATu+c4tkjKE8pOxIzF6SR+k9kjXBbUacAEwO8jCz/wjLjGg==
+-----END CERTIFICATE-----
 _EOC_
 
 no_long_string();
@@ -240,5 +280,129 @@ sliced=true
 GET /t
 --- response_body
 0,1,2
+--- no_error_log
+[error]
+
+
+
+=== TEST 5: connect verify falls back to lua_ssl_trusted_certificate
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls.crt;
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            local ok, err = httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.status = 500
+                ngx.say("connect: ", err)
+                return
+            end
+
+            local res = assert(httpc:request({ path = "/" }))
+
+            ngx.say(res.status)
+            ngx.print(res:read_body())
+            httpc:close()
+        }
+    }
+--- request
+GET /t
+--- response_body
+200
+secure
+--- no_error_log
+[error]
+
+
+
+=== TEST 6: locations with different directive CAs use different pools
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /conn {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls.crt;
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            local ok, err = httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.say("connect: ", err)
+                return
+            end
+
+            local reused = httpc:get_reused_times()
+            local res = assert(httpc:request({ path = "/",
+                                               preread_body = true }))
+            assert(res.status == 200)
+            httpc:set_keepalive()
+            ngx.say(reused)
+        }
+    }
+
+    location /conn-b {
+        lua_ssl_trusted_certificate $TEST_NGINX_SERVER_ROOT/html/tls-copy.crt;
+        content_by_lua_block {
+            local http = require "resty.ngx_http_ffi_client"
+            local httpc = http.new()
+            httpc:set_timeout(2000)
+
+            local ok, err = httpc:connect({
+                scheme = "https",
+                host = "127.0.0.1",
+                port = 12699,
+                ssl_verify = true,
+                ssl_server_name = "test.local",
+            })
+            if not ok then
+                ngx.say("connect: ", err)
+                return
+            end
+
+            local reused = httpc:get_reused_times()
+            local res = assert(httpc:request({ path = "/",
+                                               preread_body = true }))
+            assert(res.status == 200)
+            httpc:set_keepalive()
+            ngx.say(reused)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            -- same host, port and verify mode throughout; the two locations
+            -- differ only in the directive's CA path (equal file content), so
+            -- a shared pool here would mean the resolved CA is missing from
+            -- the keepalive key
+            local a1 = ngx.location.capture("/conn")
+            local b1 = ngx.location.capture("/conn-b")
+            local a2 = ngx.location.capture("/conn")
+            ngx.print(a1.body, b1.body, a2.body)
+        }
+    }
+--- request
+GET /t
+--- response_body
+0
+0
+1
 --- no_error_log
 [error]
