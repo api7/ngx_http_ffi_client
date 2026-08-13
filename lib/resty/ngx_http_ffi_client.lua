@@ -217,6 +217,14 @@ local function resolve_host(host, override)
         return nil, "resolver must be a function"
     end
 
+    -- C judges the host it is given, which after this is the address, so the
+    -- name is held to the same rule here: what C calls a VCHAR string, no
+    -- space, no control character. A resolver never launders an invalid host
+    -- into a Host header, where a space would be legal.
+    if string_find(host, "[%z\1-\32\127]") then
+        return nil, "invalid host"
+    end
+
     local ip, err = resolver(host)
 
     if type(ip) ~= "string" or ip == "" then
@@ -747,11 +755,12 @@ function client.connect(self, opts, port_arg)
         return nil, resolve_err
     end
 
+    -- held until the connect is accepted: a second connect on a live object is
+    -- refused with the first connection intact, and that connection keeps the
+    -- Host it was opened with
+    local host_header
     if host ~= name then
-        self._host_header = host_header_value(name, port)
-
-    else
-        self._host_header = nil
+        host_header = host_header_value(name, port)
     end
 
     if self._op == nil then
@@ -801,6 +810,7 @@ function client.connect(self, opts, port_arg)
     end
 
     self._connected = true
+    self._host_header = host_header
 
     return 1
 end

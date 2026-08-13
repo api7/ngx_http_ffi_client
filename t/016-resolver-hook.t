@@ -11,6 +11,21 @@ our $HttpConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
 };
 
+our $InitConfig = qq{
+    lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
+
+    init_by_lua_block {
+        local client = require "resty.ngx_http_ffi_client"
+
+        -- installed once at init, as a host application would, and yielding
+        -- the way a Lua DNS client does
+        client.set_resolver(function (host)
+            ngx.sleep(0.001)
+            return "127.0.0.1"
+        end)
+    }
+};
+
 our $TlsConfig = qq{
     lua_package_path "$ENV{TEST_NGINX_LUA_PACKAGE_PATH};;";
 
@@ -461,5 +476,320 @@ GET /t
 false
 resolver must be a function or nil
 no resolver defined to resolve "test.local"
+--- no_error_log
+[error]
+
+
+
+=== TEST 10: a resolver installed at init reaches the worker
+--- http_config eval: $::InitConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /echo {
+        content_by_lua_block {
+            local body = ngx.var.http_host .. "\n"
+            ngx.header["Content-Length"] = #body
+            ngx.print(body)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local res, err = client.request_uri({
+                host = "test.local",
+                port = ngx.var.server_port,
+                path = "/echo",
+                timeout = 1000,
+            })
+
+            if not res then
+                ngx.say(err)
+                return
+            end
+
+            ngx.print(res.body == "test.local:" .. ngx.var.server_port .. "\n")
+        }
+    }
+--- request
+GET /t
+--- response_body chomp
+true
+--- no_error_log
+[error]
+
+
+
+=== TEST 11: the stateful object takes the same resolver, yields and all
+--- http_config eval: $::InitConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /echo {
+        content_by_lua_block {
+            local body = ngx.var.http_host .. "\n"
+            ngx.header["Content-Length"] = #body
+            ngx.print(body)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            local httpc = client.new()
+            httpc:set_timeout(1000)
+
+            assert(httpc:connect({
+                host = "test.local",
+                port = ngx.var.server_port,
+            }))
+
+            local res = assert(httpc:request({ path = "/echo" }))
+            local body = assert(res:read_body())
+            httpc:close()
+
+            ngx.print(body == "test.local:" .. ngx.var.server_port .. "\n")
+        }
+    }
+--- request
+GET /t
+--- response_body chomp
+true
+--- no_error_log
+[error]
+
+
+
+=== TEST 12: an address the resolver answers with may be IPv6
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    listen [::1]:$TEST_NGINX_SERVER_PORT;
+
+    location /echo {
+        content_by_lua_block {
+            local body = ngx.var.http_host .. "\n"
+            ngx.header["Content-Length"] = #body
+            ngx.print(body)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            client.set_resolver(function (host)
+                return "::1"
+            end)
+
+            local res, err = client.request_uri({
+                host = "test.local",
+                port = ngx.var.server_port,
+                path = "/echo",
+                timeout = 1000,
+            })
+
+            if not res then
+                ngx.say(err)
+                return
+            end
+
+            ngx.print(res.body == "test.local:" .. ngx.var.server_port .. "\n")
+        }
+    }
+--- request
+GET /t
+--- response_body chomp
+true
+--- no_error_log
+[error]
+
+
+
+=== TEST 13: a name the resolver would answer for is still held to the host rule
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            client.set_resolver(function (host)
+                return "127.0.0.1"
+            end)
+
+            -- a space is legal in a header value, so a resolved name must be
+            -- refused here rather than reaching the peer as a malformed Host
+            local res, err = client.request_uri({
+                host = "127.0.0.1 evil",
+                port = ngx.var.server_port,
+                path = "/",
+                timeout = 1000,
+            })
+
+            ngx.say(res and ("unexpected " .. res.status) or err)
+
+            local httpc = client.new()
+            httpc:set_timeout(1000)
+
+            local ok, connect_err = httpc:connect({
+                host = "127.0.0.1 evil",
+                port = ngx.var.server_port,
+            })
+
+            ngx.say(ok == nil)
+            ngx.say(connect_err)
+        }
+    }
+--- request
+GET /t
+--- response_body
+invalid host
+true
+invalid host
+--- no_error_log
+[error]
+
+
+
+=== TEST 14: a CRLF name never reaches the wire
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            client.set_resolver(function (host)
+                return "127.0.0.1"
+            end)
+
+            for _, host in ipairs({ "evil\r\nX-Injected: 1",
+                                    "evil\r\nX-Injected 1" }) do
+                local res, err = client.request_uri({
+                    host = host,
+                    port = ngx.var.server_port,
+                    path = "/",
+                    timeout = 1000,
+                })
+
+                ngx.say(res and ("unexpected " .. res.status) or err)
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+invalid host
+invalid host
+--- no_error_log
+[error]
+
+
+
+=== TEST 15: a per-call resolver overrides the installed one
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    listen 127.0.0.2:$TEST_NGINX_SERVER_PORT;
+
+    location /echo {
+        content_by_lua_block {
+            local body = ngx.var.server_addr .. " " .. ngx.var.http_host .. "\n"
+            ngx.header["Content-Length"] = #body
+            ngx.print(body)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            client.set_resolver(function (host)
+                return "127.0.0.1"
+            end)
+
+            local function per_call(host)
+                return "127.0.0.2"
+            end
+
+            local res = assert(client.request_uri({
+                host = "test.local",
+                port = ngx.var.server_port,
+                path = "/echo",
+                resolver = per_call,
+                timeout = 1000,
+            }))
+
+            local httpc = client.new()
+            httpc:set_timeout(1000)
+
+            assert(httpc:connect({
+                host = "test.local",
+                port = ngx.var.server_port,
+                resolver = per_call,
+            }))
+
+            local stateful = assert(httpc:request({ path = "/echo" }))
+            local body = assert(stateful:read_body())
+            httpc:close()
+
+            -- the per-call address was dialled on both entry points
+            local want = "127.0.0.2 test.local:" .. ngx.var.server_port .. "\n"
+            ngx.say(res.body == want)
+            ngx.print(body == want)
+        }
+    }
+--- request
+GET /t
+--- response_body chomp
+true
+true
+--- no_error_log
+[error]
+
+
+
+=== TEST 16: a refused reconnect leaves the live connection its own Host
+--- http_config eval: $::HttpConfig
+--- user_files eval: $::UserFiles
+--- config
+    location /echo {
+        content_by_lua_block {
+            local body = ngx.var.http_host .. "\n"
+            ngx.header["Content-Length"] = #body
+            ngx.print(body)
+        }
+    }
+
+    location /t {
+        content_by_lua_block {
+            local client = require "resty.ngx_http_ffi_client"
+            client.set_resolver(function (host)
+                return "127.0.0.1"
+            end)
+
+            local httpc = client.new()
+            httpc:set_timeout(1000)
+
+            assert(httpc:connect({
+                host = "127.0.0.1",
+                port = ngx.var.server_port,
+            }))
+
+            -- refused, and the connection above is still the live one
+            local ok, err = httpc:connect({
+                host = "test.local",
+                port = ngx.var.server_port,
+            })
+            ngx.say(ok == nil, " ", err)
+
+            local res = assert(httpc:request({ path = "/echo" }))
+            local body = assert(res:read_body())
+            httpc:close()
+
+            ngx.print(body == "127.0.0.1:" .. ngx.var.server_port .. "\n")
+        }
+    }
+--- request
+GET /t
+--- response_body chomp
+true already connected
+true
 --- no_error_log
 [error]
