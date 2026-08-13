@@ -15,6 +15,8 @@ local pairs = pairs
 local setmetatable = setmetatable
 local string_lower = string.lower
 local string_gsub = string.gsub
+local string_find = string.find
+local string_match = string.match
 local table_concat = table.concat
 local ngx_encode_args = ngx.encode_args
 local co_yield = coroutine._yield
@@ -166,6 +168,119 @@ local function set_str(dst, value)
     dst.len = #value
 
     return value
+end
+
+
+-- ===== name resolution =====
+--
+-- C dials through nginx's `resolver` directive and knows nothing else. A host
+-- application that owns a resolver installs it here, and the name is resolved
+-- on this side before anything crosses the FFI boundary: the address is what
+-- the pool key and the connect are built from, while the Host header and the
+-- SNI keep the name.
+
+
+local resolver_hook
+
+
+-- A hostname cannot hold a ':', so a colon means an IPv6 literal, bracketed or
+-- not. The IPv4 literal is four decimal octets.
+local function is_ip_literal(host)
+    if string_find(host, ":", 1, true) then
+        return true
+    end
+
+    local a, b, c, d = string_match(host, "^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then
+        return false
+    end
+
+    return tonumber(a) < 256 and tonumber(b) < 256
+           and tonumber(c) < 256 and tonumber(d) < 256
+end
+
+
+-- The address to dial. The name comes back unchanged when no resolver is
+-- installed or it is already an address.
+local function resolve_host(host, override)
+    local resolver = override
+
+    if resolver == nil then
+        resolver = resolver_hook
+    end
+
+    if not resolver or is_ip_literal(host) then
+        return host
+    end
+
+    if type(resolver) ~= "function" then
+        return nil, "resolver must be a function"
+    end
+
+    -- C judges the host it is given, which after this is the address, so the
+    -- name is held to the same rule here: what C calls a VCHAR string, no
+    -- space, no control character. A resolver never launders an invalid host
+    -- into a Host header, where a space would be legal.
+    if string_find(host, "[%z\1-\32\127]") then
+        return nil, "invalid host"
+    end
+
+    local ip, err = resolver(host)
+
+    if type(ip) ~= "string" or ip == "" then
+        return nil, host .. " could not be resolved ("
+                    .. (err or "no address") .. ")"
+    end
+
+    return ip
+end
+
+
+-- What C would have written from the name, so resolving changes the address
+-- dialled and nothing the peer sees.
+local function host_header_value(host, port)
+    if port == 80 then
+        return host
+    end
+
+    return host .. ":" .. port
+end
+
+
+-- The caller's table is left alone: the copy carries the name C can no longer
+-- derive from the address. A caller-set Host wins, as it does everywhere else.
+local function with_host_header(headers, value)
+    local out = {}
+
+    if headers ~= nil then
+        if type(headers) ~= "table" then
+            return headers
+        end
+
+        for key, header_value in pairs(headers) do
+            if type(key) == "string" and string_lower(key) == "host" then
+                return headers
+            end
+
+            out[key] = header_value
+        end
+    end
+
+    out["Host"] = value
+
+    return out
+end
+
+
+-- set_resolver(fn) installs the resolver every non-IP host goes through;
+-- set_resolver(nil) removes it. fn(host) returns an address, or nil and an
+-- error that surfaces as a connect error.
+function _M.set_resolver(fn)
+    if fn ~= nil and type(fn) ~= "function" then
+        error("resolver must be a function or nil", 2)
+    end
+
+    resolver_hook = fn
 end
 
 
@@ -343,6 +458,20 @@ function _M.request_uri(opts)
         return nil, "ssl_trusted_certificate must be a string"
     end
 
+    -- resolved after the SNI has taken the name and before the pool key is
+    -- derived from the address: the certificate is still judged against the
+    -- name, and two names on two addresses keep separate pools
+    local host, resolve_err = resolve_host(opts.host, opts.resolver)
+    if not host then
+        return nil, resolve_err
+    end
+
+    local headers = opts.headers
+    if host ~= opts.host then
+        headers = with_host_header(headers,
+                                   host_header_value(opts.host, port))
+    end
+
     local method = opts.method or "GET"
     local path = opts.path or "/"
     local body = opts.body
@@ -379,7 +508,7 @@ function _M.request_uri(opts)
     end
 
     local header_arr, header_count, header_refs, header_err =
-        build_headers(opts.headers)
+        build_headers(headers)
 
     if header_err then
         return nil, header_err
@@ -389,7 +518,7 @@ function _M.request_uri(opts)
     local resp = resp_t()
     local refs = {
         set_str(req.scheme, scheme),
-        set_str(req.host, opts.host),
+        set_str(req.host, host),
         set_str(req.method, method),
         set_str(req.path, path),
         set_str(req.body, body),
@@ -550,7 +679,7 @@ function client.connect(self, opts, port_arg)
         error("no request found", 2)
     end
 
-    local host, port, scheme, pool, pool_size
+    local host, port, scheme, pool, pool_size, resolver
     local ssl_verify, ssl_server_name, ssl_trusted_certificate
 
     if type(opts) == "table" then
@@ -559,6 +688,7 @@ function client.connect(self, opts, port_arg)
         scheme = opts.scheme or "http"
         pool = opts.pool
         pool_size = opts.pool_size
+        resolver = opts.resolver
         ssl_verify = opts.ssl_verify
         ssl_server_name = opts.ssl_server_name
         ssl_trusted_certificate = opts.ssl_trusted_certificate
@@ -615,6 +745,24 @@ function client.connect(self, opts, port_arg)
         end
     end
 
+    -- the name is what the SNI and the Host header keep; the address is what
+    -- the pool key and the connect are built from
+    local name = host
+    local resolve_err
+
+    host, resolve_err = resolve_host(name, resolver)
+    if not host then
+        return nil, resolve_err
+    end
+
+    -- held until the connect is accepted: a second connect on a live object is
+    -- refused with the first connection intact, and that connection keeps the
+    -- Host it was opened with
+    local host_header
+    if host ~= name then
+        host_header = host_header_value(name, port)
+    end
+
     if self._op == nil then
         local op = c_new(r)
         if op == nil then
@@ -632,7 +780,7 @@ function client.connect(self, opts, port_arg)
         set_str(cp.scheme, scheme),
         set_str(cp.host, host),
         set_str(cp.keepalive_pool, pool),
-        set_str(cp.ssl_server_name, ssl and (ssl_server_name or host) or nil),
+        set_str(cp.ssl_server_name, ssl and (ssl_server_name or name) or nil),
         set_str(cp.ssl_trusted_certificate,
                 ssl and ssl_trusted_certificate or nil),
     }
@@ -662,6 +810,7 @@ function client.connect(self, opts, port_arg)
     end
 
     self._connected = true
+    self._host_header = host_header
 
     return 1
 end
@@ -807,8 +956,13 @@ function client.request(self, params)
         body = tostring(body)
     end
 
+    local headers = params.headers
+    if self._host_header then
+        headers = with_host_header(headers, self._host_header)
+    end
+
     local header_arr, header_count, header_refs, header_err =
-        build_headers(params.headers)
+        build_headers(headers)
 
     if header_err then
         return nil, header_err

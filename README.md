@@ -75,6 +75,33 @@ very large responses.
 - A request header may be given as an array too: each value is sent as its own
   header line, so a response table can be passed straight back.
 
+### Name resolution
+
+C dials through nginx's `resolver` directive and knows nothing else, so a host
+application that owns a resolver installs it here:
+
+```lua
+client.set_resolver(function (host)
+    return ip, err          -- nil plus an error surfaces as a connect error
+end)
+```
+
+Every host that is not already an IP literal goes through it, on both entry
+points, before anything crosses into C. The name is resolved first so the
+address is what the connect and the keepalive pool key are built from: two
+names on two addresses never share a pooled connection. What the peer sees
+keeps the name: the `Host` header carries it, with the port whenever the client
+would have written one, and the SNI is the name, so the certificate is still
+judged against it. A caller-set `Host` or `ssl_server_name` still wins.
+
+`set_resolver(nil)` removes it, and `resolver = <fn>` on a single
+`request_uri` or `connect` overrides the installed one for that call.
+`resolver = false` opts that call out and leaves the name to nginx.
+
+In APISIX this is one call at init with `core.resolver.parse_domain`, which is
+what makes this client agree with every cosocket in the gateway about
+`/etc/hosts`, `dns_resolver` and the search domains (#45).
+
 ### Request validation
 
 The method and every header name must be an RFC 9110 `token`, a header value
