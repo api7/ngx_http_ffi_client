@@ -544,6 +544,19 @@ ngx_http_ffi_client_keepalive_close_connection(ngx_connection_t *c)
         ngx_del_timer(c->write);
     }
 
+#if (NGX_SSL)
+    if (c->ssl) {
+        c->ssl->no_wait_shutdown = 1;
+        c->ssl->no_send_shutdown = 1;
+        (void) ngx_ssl_shutdown(c);
+    }
+#endif
+
+    if (c->pool) {
+        ngx_destroy_pool(c->pool);
+        c->pool = NULL;
+    }
+
     ngx_close_connection(c);
 }
 
